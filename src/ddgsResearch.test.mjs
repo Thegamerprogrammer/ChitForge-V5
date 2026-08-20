@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { bangUrl, classifyExtractionFailure, classifySearchFailure, DDGS_TEXT_BACKEND, EXTRACTION_STATUS, SEARCH_STATUS, normalizeDdgsQuery, searchWithBackendFallback, extractSource } from './ddgsResearch.js';
+import { bangUrl, classifyExtractionFailure, classifySearchFailure, DDGS_LIMITS, DDGS_TEXT_BACKEND, EXTRACTION_STATUS, SEARCH_STATUS, normalizeDdgsQuery, searchWithBackendFallback, extractSource } from './ddgsResearch.js';
 import { normalizeEvidenceSource, validateSources } from './sourceValidation.js';
 
 assert.equal(classifySearchFailure({ status: 500, body: 'No results found' }), SEARCH_STATUS.NO_RESULTS_FOR_QUERY);
@@ -48,6 +48,11 @@ assert(exportSource.includes('Retrieval Status'), 'DOCX includes retrieval statu
 assert(!exportSource.includes('Manual Verification'), 'DOCX does not show Manual Verification as a titled label');
 
 assert.equal(DDGS_TEXT_BACKEND, 'duckduckgo');
+assert.equal(DDGS_LIMITS.searchConcurrency, 1);
+assert.equal(DDGS_LIMITS.extractConcurrency, 2);
+assert.equal(DDGS_LIMITS.searchPaceMs, 1000);
+assert.equal(DDGS_LIMITS.extractPaceMs, 750);
+assert.equal(DDGS_LIMITS.retries, 1);
 assert.equal(normalizeDdgsQuery('ECOFIN Sovereign debt restructuring India RECOVERY LEVEL 3: generate new defensible POIs without reusing rejected angles. Previous Gemini batch under-produced. Return STRICT JSON'), 'ECOFIN Sovereign debt restructuring India');
 assert.equal(normalizeDdgsQuery('India India sovereign debt debt G20 Common Framework'), 'India sovereign debt G20 Common Framework');
 
@@ -69,6 +74,20 @@ assert.equal(search.results.length, 1);
 assert.equal(calls.length, 2);
 assert.notEqual(calls[0].body.query, calls[1].body.query);
 
+
+const newsCalls = [];
+global.fetch = async (url, options) => {
+  const body = JSON.parse(options.body);
+  newsCalls.push({ url: String(url), body });
+  assert(String(url).endsWith('/search/news'));
+  assert.equal(body.backend, 'duckduckgo');
+  return Response.json({ results: [{ date: '2026-01-01T00:00:00+00:00', title: 'Debt news', body: 'News body', url: 'https://news.example/article', image: null, source: 'Example News' }] });
+};
+const newsSearch = await searchWithBackendFallback('Indonesia sovereign debt', 5, { endpoint: '/search/news' });
+assert.equal(newsSearch.results.length, 1);
+assert.equal(newsSearch.results[0].url, 'https://news.example/article');
+assert.equal(newsCalls.length, 1);
+
 const emptyCalls = [];
 global.fetch = async (url, options) => { emptyCalls.push(JSON.parse(options.body)); return new Response('No results found', { status: 500 }); };
 const empty = await searchWithBackendFallback('No result unique qxjv RECOVERY LEVEL 4 generate POIs', 5);
@@ -85,4 +104,7 @@ assert.equal(blocked.extractedText, '');
 assert.equal(blocked.url, 'https://www.imf.org/report');
 assert.match(blocked.bangUrl, /duckduckgo\.com/);
 assert.equal(extractCalls, 1);
+const researchSource = fs.readFileSync(new URL('./ddgsResearch.js', import.meta.url), 'utf8');
+assert(!/relevanceScore|source quality score|coverage score|KeepBest/i.test(researchSource), 'research does not introduce source scoring');
+
 console.log('DDGS failure classification dry-run passed');

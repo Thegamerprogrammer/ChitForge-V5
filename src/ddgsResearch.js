@@ -1,10 +1,9 @@
 const DDGS_BASE_URL = 'http://127.0.0.1:4479';
-export const DDGS_LIMITS = { minHardMax: 80, absoluteSafetyCeiling: 650, searchConcurrency: 1, extractConcurrency: 3, retries: 2, timeoutMs: 9000, paceMs: 175, backoffBaseMs: 350, queryMaxChars: 180 };
+export const DDGS_LIMITS = { minHardMax: 80, absoluteSafetyCeiling: 650, searchConcurrency: 1, extractConcurrency: 2, retries: 1, timeoutMs: 9000, searchPaceMs: 1000, extractPaceMs: 750, backoffBaseMs: 350, queryMaxChars: 180 };
 export const DDGS_TEXT_BACKEND = 'duckduckgo';
 export const DDGS_BACKENDS = [DDGS_TEXT_BACKEND];
 export const SEARCH_STATUS = { SUCCESS: 'SUCCESS', NO_RESULTS_FOR_QUERY: 'NO_RESULTS_FOR_QUERY', RATE_LIMITED: 'RATE_LIMITED', TIMEOUT: 'TIMEOUT', CONNECTION_ERROR: 'CONNECTION_ERROR', DDGS_UPSTREAM_ERROR: 'DDGS_UPSTREAM_ERROR', SEARCH_FAILED: 'SEARCH_FAILED' };
 export const EXTRACTION_STATUS = { DISCOVERED: 'DISCOVERED_FROM_SEARCH', RETRIEVED: 'RETRIEVED', DISCOVERED_NOT_RETRIEVED: 'DISCOVERED_NOT_RETRIEVED', DISCOVERED_DIRECT_EXTRACTION_BLOCKED: 'DISCOVERED_DIRECT_EXTRACTION_BLOCKED', RATE_LIMITED: 'RATE_LIMITED', DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR: 'DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR', DISCOVERED_NOT_RETRIEVED_TIMEOUT: 'DISCOVERED_NOT_RETRIEVED_TIMEOUT', DISCOVERED_NOT_RETRIEVED_NETWORK: 'DISCOVERED_NOT_RETRIEVED_NETWORK' };
-const HIGH_VALUE = [/\.gov(\.|\/|$)/i, /\.int(\.|\/|$)/i, /un\.org$/i, /worldbank\.org$/i, /imf\.org$/i, /oecd\.org$/i, /wto\.org$/i, /icj-cij\.org$/i, /reuters\.com$/i, /apnews\.com$/i, /ft\.com$/i, /bbc\./i, /bloomberg\.com$/i];
 
 export function canonicalUrl(raw = '') { try { const url = new URL(raw); url.hash = ''; ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'fbclid', 'gclid'].forEach((key) => url.searchParams.delete(key)); url.hostname = url.hostname.replace(/^www\./, '').toLowerCase(); url.pathname = url.pathname.replace(/\/$/, ''); return url.toString(); } catch { return ''; } }
 export function domainFromResult(url = '') { try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; } }
@@ -79,7 +78,6 @@ export function alternateQueryForNoResults(query) {
 }
 
 function contentSignature(result = {}) { return `${result.title || ''} ${result.body || result.snippet || ''}`.toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/[^a-z0-9]+/g, ' ').split(' ').filter((word) => word.length > 4).slice(0, 18).join(' '); }
-function scoreResult(result, missionText) { const hay = `${result.title || ''} ${result.body || result.snippet || ''} ${result.href || ''}`.toLowerCase(); const terms = missionText.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 4); const matches = new Set(terms.filter((term) => hay.includes(term))).size; const domain = domainFromResult(result.href); return matches + (HIGH_VALUE.some((rx) => rx.test(domain)) ? 8 : 0) + (/pdf|treaty|resolution|report|statement|vote|voting|policy|foreign|official|court|law/i.test(hay) ? 3 : 0); }
 
 export function buildResearchQueries({ form, sliders, selectedTargets = [], targetingMode, poiTypes = [] }) {
   const base = [form.committee, form.agenda, form.portfolio, form.researchNotes].filter(Boolean).join(' ');
@@ -105,20 +103,22 @@ export async function checkDdgsHealth({ fetchImpl = fetch, baseUrl = DDGS_BASE_U
   try { const res = await fetchWithTimeout(`${baseUrl}/health`, { method: 'GET' }, 2500, fetchImpl); return { ok: res.ok, status: res.status, detail: res.ok ? 'DDGS API healthy.' : await res.text().catch(() => '') }; }
   catch (error) { return { ok: false, status: 0, detail: error?.name === 'AbortError' ? 'DDGS health check timed out.' : `DDGS API unavailable: ${error?.message || error}` }; }
 }
-async function searchTextOnce(query, maxResults, backend, { fetchImpl = fetch, baseUrl = DDGS_BASE_URL } = {}) {
+async function searchEndpointOnce(endpoint, query, maxResults, backend, { fetchImpl = fetch, baseUrl = DDGS_BASE_URL } = {}) {
   try {
-    const res = await fetchWithTimeout(`${baseUrl}/search/text`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, region: 'us-en', safesearch: 'moderate', max_results: maxResults, backend }) }, DDGS_LIMITS.timeoutMs, fetchImpl);
+    const res = await fetchWithTimeout(`${baseUrl}${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, region: 'us-en', safesearch: 'moderate', max_results: maxResults, backend }) }, DDGS_LIMITS.timeoutMs, fetchImpl);
     if (!res.ok) { const body = await res.text().catch(() => ''); const status = classifySearchFailure({ status: res.status, body }); return { ok: false, status, httpStatus: res.status, body, backend, query, results: [] }; }
     const payload = await res.json(); const results = Array.isArray(payload.results) ? payload.results : Array.isArray(payload) ? payload : [];
     return { ok: true, status: results.length ? SEARCH_STATUS.SUCCESS : SEARCH_STATUS.NO_RESULTS_FOR_QUERY, httpStatus: 200, backend, query, results };
   } catch (error) { return { ok: false, status: classifySearchFailure({ error }), httpStatus: 0, backend, query, error, results: [] }; }
 }
+async function searchTextOnce(query, maxResults, backend, options = {}) { return searchEndpointOnce('/search/text', query, maxResults, backend, options); }
+async function searchNewsOnce(query, maxResults, backend, options = {}) { return searchEndpointOnce('/search/news', query, maxResults, backend, options); }
 export function alternateQueries(query) {
   const alternate = alternateQueryForNoResults(query);
   const normalized = normalizeDdgsQuery(query);
   return alternate && alternate !== normalized ? [alternate] : [];
 }
-export async function searchWithBackendFallback(query, maxResults = 10, { fetchImpl = fetch, baseUrl = DDGS_BASE_URL, onAttempt } = {}) {
+export async function searchWithBackendFallback(query, maxResults = 10, { fetchImpl = fetch, baseUrl = DDGS_BASE_URL, onAttempt, endpoint = '/search/text' } = {}) {
   const attempts = [];
   const backend = DDGS_TEXT_BACKEND;
   const normalized = normalizeDdgsQuery(query);
@@ -128,7 +128,7 @@ export async function searchWithBackendFallback(query, maxResults = 10, { fetchI
     const maxAttempts = queryIndex === 0 ? DDGS_LIMITS.retries : 0;
     for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
       if (attempt) await sleep(jitter(DDGS_LIMITS.backoffBaseMs * (2 ** (attempt - 1))));
-      const result = await searchTextOnce(intentQuery, maxResults, backend, { fetchImpl, baseUrl });
+      const result = endpoint === '/search/news' ? await searchNewsOnce(intentQuery, maxResults, backend, { fetchImpl, baseUrl }) : await searchTextOnce(intentQuery, maxResults, backend, { fetchImpl, baseUrl });
       attempts.push({ query: intentQuery, backend, status: result.status, httpStatus: result.httpStatus }); onAttempt?.(attempts.at(-1));
       if (result.results.length) return { ...result, attempts };
       if (result.status === SEARCH_STATUS.NO_RESULTS_FOR_QUERY) break;
@@ -152,7 +152,7 @@ export async function extractSource(source, options = {}) {
   return extractOnce(source, options);
 }
 async function mapLimit(items, limit, fn) { const out = new Array(items.length); let next = 0; const workers = Array.from({ length: Math.min(limit, items.length) }, async () => { while (next < items.length) { const index = next; next += 1; out[index] = await fn(items[index], index); } }); await Promise.all(workers); return out; }
-function sourceFromResult(result, query, backend, missionText) { const url = canonicalUrl(result.href || result.url || result.link); const domain = domainFromResult(url); return { sourceId: `ddgs:${backend}:${url}`, url, canonicalUrl: url, title: result.title || 'Untitled source', snippet: result.body || result.snippet || '', publicationDate: result.date || result.published || '', domain, query, ddgsQuery: query, searchBackend: backend, bangUrl: bangUrl(domain, query), discoveryStatus: EXTRACTION_STATUS.DISCOVERED, extractionStatus: EXTRACTION_STATUS.DISCOVERED, retrievedAt: new Date().toISOString(), relevanceScore: scoreResult({ ...result, href: url }, missionText) }; }
+function sourceFromResult(result, query, backend) { const url = canonicalUrl(result.href || result.url || result.link); const domain = domainFromResult(url); return { sourceId: `ddgs:${backend}:${url}`, url, canonicalUrl: url, title: result.title || 'Untitled source', snippet: result.body || result.snippet || '', publicationDate: result.date || result.published || '', domain, query, ddgsQuery: query, searchBackend: backend, bangUrl: bangUrl(domain, query), discoveryStatus: EXTRACTION_STATUS.DISCOVERED, extractionStatus: EXTRACTION_STATUS.DISCOVERED, retrievalStatus: EXTRACTION_STATUS.DISCOVERED, retrievedAt: new Date().toISOString() }; }
 
 export async function discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount = 20, recoveryFocus = '', onProgress }) {
   const health = await checkDdgsHealth();
@@ -160,19 +160,21 @@ export async function discoverResearch({ form, sliders, selectedTargets, targeti
   if (!health.ok) return { schema: 'DDGS API /search/text + /extract (OpenAPI 3.1.0)', health, queries, sources: [], retrievedSources: [], bangUrls: [], automaticTargetCandidates: [], failures: [{ status: 'DDGS_API_UNAVAILABLE', detail: health.detail }], stats: { queryCount: queries.length, discoveredUrls: 0, retainedUrls: 0, retrievedSources: 0, bangUrls: 0, hardMax: 0, softMax: 0, preferredRange: '0-0', adaptiveCeiling: 0, absoluteSafetyCeiling: DDGS_LIMITS.absoluteSafetyCeiling } };
   const budget = planResearchBudget({ poiCount, selectedTargets, sliders, form, coverageGaps: recoveryFocus ? 2 : 0 });
   const byUrl = new Map(); const contentSignatures = new Set(); const failures = []; let staleRounds = 0;
-  const missionText = [form.committee, form.agenda, form.portfolio, form.researchNotes].join(' ');
   for (const query of queries) {
     if (byUrl.size >= budget.softMax && staleRounds >= 2) break;
     onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `DDGS URL discovery: ${byUrl.size}/${budget.softMax} retained.`, done: byUrl.size, total: budget.softMax });
     const before = byUrl.size;
-    const search = await searchWithBackendFallback(query, sliders.controversy >= 70 ? 12 : 8, { onAttempt: (attempt) => { if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, recoverable: true }); } });
-    search.results.forEach((result) => { if (byUrl.size >= budget.hardMax) return; const source = sourceFromResult(result, search.query, search.backend, missionText); const signature = contentSignature(result); if (!source.url || byUrl.has(source.url) || (signature && contentSignatures.has(signature)) || /wikipedia\.org/i.test(source.url)) return; if (signature) contentSignatures.add(signature); byUrl.set(source.url, source); });
-    staleRounds = byUrl.size - before < 3 ? staleRounds + 1 : 0; await sleep(DDGS_LIMITS.paceMs);
+    const searches = [
+      await searchWithBackendFallback(query, sliders.controversy >= 70 ? 12 : 8, { onAttempt: (attempt) => { if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, endpoint: '/search/text', recoverable: true }); } }),
+      await searchWithBackendFallback(query, 4, { endpoint: '/search/news', onAttempt: (attempt) => { if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, endpoint: '/search/news', recoverable: true }); } }),
+    ];
+    searches.flatMap((search) => search.results.map((result) => ({ result, search }))).forEach(({ result, search }) => { if (byUrl.size >= budget.hardMax) return; const source = sourceFromResult(result, search.query, search.backend); const signature = contentSignature(result); if (!source.url || byUrl.has(source.url) || (signature && contentSignatures.has(signature)) || /wikipedia\.org/i.test(source.url)) return; if (signature) contentSignatures.add(signature); byUrl.set(source.url, source); });
+    staleRounds = byUrl.size - before < 3 ? staleRounds + 1 : 0; await sleep(DDGS_LIMITS.searchPaceMs);
     if (byUrl.size >= budget.preferredMin && staleRounds >= 2) break;
   }
-  const sources = [...byUrl.values()].sort((a, b) => b.relevanceScore - a.relevanceScore).slice(0, budget.hardMax);
+  const sources = [...byUrl.values()].slice(0, budget.hardMax);
   const extractionCandidates = sources.slice(0, Math.min(budget.extractMax, sources.length));
-  const retrieved = await mapLimit(extractionCandidates, DDGS_LIMITS.extractConcurrency, async (source) => { const extracted = await extractSource(source); await sleep(DDGS_LIMITS.paceMs); return extracted; });
+  const retrieved = await mapLimit(extractionCandidates, DDGS_LIMITS.extractConcurrency, async (source) => { const extracted = await extractSource(source); await sleep(DDGS_LIMITS.extractPaceMs); return extracted; });
   const merged = sources.map((source) => retrieved.find((r) => r.url === source.url) || source);
   const automaticTargetCandidates = deriveAutomaticTargetCandidates({ form, sources: merged, selectedTargets });
   return { schema: 'DDGS API /search/text + /extract (OpenAPI 3.1.0)', health, queries, sources: merged, retrievedSources: retrieved, bangUrls: merged.map((s) => s.bangUrl).filter(Boolean), automaticTargetCandidates, failures, stats: { queryCount: queries.length, discoveredUrls: byUrl.size, retainedUrls: merged.length, retrievedSources: retrieved.filter((s) => s.extractedText).length, extractionBlocked: retrieved.filter((s) => s.extractionStatus === EXTRACTION_STATUS.DISCOVERED_DIRECT_EXTRACTION_BLOCKED).length, bangUrls: merged.filter((s) => s.bangUrl).length, hardMax: budget.hardMax, softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, adaptiveCeiling: budget.hardMax, absoluteSafetyCeiling: budget.absoluteSafetyCeiling } };
