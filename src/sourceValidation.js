@@ -28,6 +28,12 @@ export function domainFromUrl(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
 }
 
+export function bangUrlForSource(domain, query) {
+  const cleanDomain = String(domain || '').trim();
+  const cleanQuery = String(query || '').replace(/\s+/g, ' ').trim();
+  return cleanDomain && cleanQuery ? `https://duckduckgo.com/?q=${encodeURIComponent(`!site:${cleanDomain} ${cleanQuery}`)}` : '';
+}
+
 export function validateSourceUrl(url) {
   const raw = String(url || '').trim();
   if (!raw || BAD_URL.test(raw)) return { status: SOURCE_STATUSES.FAILED, reason: 'No traceable source URL was supplied.' };
@@ -48,7 +54,10 @@ export function normalizeEvidenceSource(raw = {}) {
   const url = raw.url || raw.sourceUrl || raw.source_url || raw.link || '';
   const structural = validateSourceUrl(url);
   const sourceType = normalizeSourceType(raw.sourceType || raw.source_type || raw.sourceClassification || raw.type || organization);
-  return { sourceName, organization, publicationDate, url, claimSupported: raw.claimSupported || raw.claim || raw.text || 'Claim support must be checked.', sourceType, confidence: Number(raw.confidence || 0), quality: sourceQuality(sourceType), status: structural.status, verificationReason: structural.reason, domain: structural.domain || raw.domain || domainFromUrl(url), ddgsQuery: raw.ddgsQuery || raw.query || '', bangUrl: raw.bangUrl || raw.duckDuckGoBangUrl || raw.duckduckgo_bang_url || '', canonicalUrl: raw.canonicalUrl || raw.canonical_url || url, eventDate: raw.eventDate || raw.event_date || '', informationDate: raw.informationDate || raw.information_date || '', extractionStatus: raw.extractionStatus || raw.extraction_status || (raw.extractedText ? SOURCE_STATUSES.RETRIEVED : ''), searchBackend: raw.searchBackend || raw.backend || '' };
+  const domain = structural.domain || raw.domain || domainFromUrl(url);
+  const ddgsQuery = raw.ddgsQuery || raw.query || '';
+  const bangUrl = raw.bangUrl || raw.duckDuckGoBangUrl || raw.duckduckgo_bang_url || bangUrlForSource(domain, ddgsQuery);
+  return { sourceName, organization, publicationDate, url, claimSupported: raw.claimSupported || raw.claim || raw.text || 'Claim support must be checked.', sourceType, confidence: Number(raw.confidence || 0), quality: sourceQuality(sourceType), status: structural.status, verificationReason: structural.reason, domain, ddgsQuery, bangUrl, canonicalUrl: raw.canonicalUrl || raw.canonical_url || url, eventDate: raw.eventDate || raw.event_date || '', informationDate: raw.informationDate || raw.information_date || '', extractionStatus: raw.extractionStatus || raw.extraction_status || (raw.extractedText ? SOURCE_STATUSES.RETRIEVED : ''), searchBackend: raw.searchBackend || raw.backend || '' };
 }
 
 export function applyFactCheckToSources(evidence = [], factCheck) {
@@ -67,6 +76,7 @@ export async function validateSources(evidence = []) {
     if (cache.has(source.url)) return { ...source, ...cache.get(source.url) };
     const structural = validateSourceUrl(source.url);
     cache.set(source.url, structural);
-    return { ...source, status: source.extractionStatus && source.extractionStatus !== SOURCE_STATUSES.RETRIEVED ? source.extractionStatus : structural.status, verificationReason: source.extractionStatus && source.extractionStatus !== SOURCE_STATUSES.RETRIEVED ? 'Discovered by DDGS; direct page extraction did not provide retrievable content.' : structural.reason, domain: structural.domain || source.domain };
+    const domain = structural.domain || source.domain || domainFromUrl(source.url);
+    return { ...source, status: source.extractionStatus && source.extractionStatus !== SOURCE_STATUSES.RETRIEVED ? source.extractionStatus : structural.status, verificationReason: source.extractionStatus && source.extractionStatus !== SOURCE_STATUSES.RETRIEVED ? 'Discovered by DDGS; direct page extraction did not provide retrievable content.' : structural.reason, domain, bangUrl: source.bangUrl || bangUrlForSource(domain, source.ddgsQuery || source.query) };
   }));
 }
