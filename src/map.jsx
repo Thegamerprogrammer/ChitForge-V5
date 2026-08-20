@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { geoNaturalEarth1, geoPath } from 'd3-geo';
+import { geoCentroid, geoNaturalEarth1, geoPath } from 'd3-geo';
 import { feature } from 'topojson-client';
-import world from 'world-atlas/countries-110m.json';
+import world from 'world-atlas/countries-50m.json';
 import countryList from 'world-countries';
 
 const numericToCountry = new Map(countryList.filter((c) => c.ccn3).map((c) => [c.ccn3, { iso: c.cca3, name: c.name.common }]));
@@ -37,7 +37,7 @@ export function WorldMap({ selected, setSelected, portfolio }) {
     const fc = feature(world, world.objects.countries);
     const projection = geoNaturalEarth1().fitSize([980, 520], fc);
     const path = geoPath(projection);
-    return fc.features.map((geo) => ({ ...normalizeCountry(geo), d: path(geo) })).filter((c) => c.d && c.iso !== '010');
+    return fc.features.map((geo) => { const [cx, cy] = projection(geoCentroid(geo)) || []; const normalized = normalizeCountry(geo); return { ...normalized, d: path(geo), cx, cy, smallHit: ['SGP','MCO','LIE','LUX','MLT','MDV','BRN','VAT','SMR','AND','KWT','QAT','BHR'].includes(normalized.iso) }; }).filter((c) => c.d && c.iso !== '010');
   }, []);
   const selectedIso = new Set(selected.map((c) => c.iso));
   const portfolioText = portfolio.trim().toLowerCase();
@@ -97,6 +97,7 @@ export function WorldMap({ selected, setSelected, portfolio }) {
         const isSelected = selectedIso.has(country.iso);
         return <path key={`${country.iso}-${country.name}`} tabIndex="0" d={country.d} data-iso={country.iso} className={`country ${isSelected ? 'selected' : ''} ${isPortfolio ? 'portfolio' : ''} ${isPortfolio && isSelected ? 'selfTarget' : ''}`} onClick={() => toggle(country)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggle(country); }} onMouseMove={(e) => moveTooltip(e, country)} onMouseLeave={hideTooltip}><title>{country.name} · {country.iso}</title></path>;
       })}
+      {countries.filter((country) => country.smallHit && Number.isFinite(country.cx) && Number.isFinite(country.cy)).map((country) => <circle key={`hit-${country.iso}`} className="countryHitArea" cx={country.cx} cy={country.cy} r="8" tabIndex="0" aria-label={`${country.name} ${country.iso}`} onClick={() => toggle(country)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggle(country); }} onMouseMove={(e) => moveTooltip(e, country)} onMouseLeave={hideTooltip}><title>{country.name} · {country.iso}</title></circle>)}
       </g>
     </svg>
     {tooltip && <div className="tooltip show" style={{ left: tooltip.x, top: tooltip.y }}><b>{tooltip.name}</b><br />ISO {tooltip.iso}</div>}
