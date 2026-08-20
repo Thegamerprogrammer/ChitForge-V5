@@ -675,3 +675,12 @@ button::after, .backgroundPicker::after, .sourceLink::after {
 .titleCard img { display: none; }
 .countryHitArea { fill: transparent; stroke: transparent; pointer-events: all; cursor: pointer; }
 .countryHitArea:hover, .countryHitArea:focus { stroke: rgba(235,247,255,.75); stroke-width: .8; }
+.targetSearch {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin: 0 0 14px;
+}
+.targetSearch .muted { grid-column: 1 / -1; margin: 0; }
+@media (max-width: 760px) { .targetSearch { grid-template-columns: 1fr; } }
