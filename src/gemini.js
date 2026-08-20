@@ -45,17 +45,18 @@ export async function discoverGeminiModels(apiKey, { force = false } = {}) {
   return result;
 }
 
-function buildBody(prompt, schema, model, { nativeJson = true } = {}) {
+function buildBody(prompt, schema, model, { nativeJson = true, attachments = [] } = {}) {
   const generationConfig = { temperature: 0.25 };
   if (nativeJson) { generationConfig.responseMimeType = 'application/json'; generationConfig.responseSchema = schema; }
   if (model?.outputTokenLimit) generationConfig.maxOutputTokens = Math.min(8192, Math.max(2048, model.outputTokenLimit));
-  return { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig };
+  const attachmentParts = (attachments || []).filter((file) => file?.data && file?.mimeType).map((file) => ({ inlineData: { mimeType: file.mimeType, data: file.data } }));
+  return { contents: [{ role: 'user', parts: [{ text: prompt }, ...attachmentParts] }], generationConfig };
 }
 
-async function rawGenerate(apiKey, model, prompt, schema, { timeoutMs = 70000, nativeJson = true } = {}) {
+async function rawGenerate(apiKey, model, prompt, schema, { timeoutMs = 70000, nativeJson = true, attachments = [] } = {}) {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(endpoint(apiKey, model.id), { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }, signal: controller.signal, body: JSON.stringify(buildBody(prompt, schema, model, { nativeJson })) });
+    const res = await fetch(endpoint(apiKey, model.id), { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }, signal: controller.signal, body: JSON.stringify(buildBody(prompt, schema, model, { nativeJson, attachments })) });
     if (!res.ok) { const reason = await parseErrorResponse(res); const category = (res.status === 401 || res.status === 403 || /api[_ ]?key|key not valid|API_KEY_INVALID/i.test(reason)) ? 'invalid-api-key' : res.status === 404 ? 'model-unavailable' : [429, 500, 503].includes(res.status) ? 'transient-model-failure' : `http-${res.status}`; throw new GeminiError(userMessageForStatus(res.status, reason), { category, status: res.status, reason, model: model.displayName }); }
     const data = await res.json();
     if (data.promptFeedback?.blockReason) throw new GeminiError(`Gemini blocked the request for safety reasons: ${data.promptFeedback.blockReason}.`, { category: 'safety-filter', reason: data.promptFeedback.blockReason, model: model.displayName });
@@ -73,7 +74,7 @@ export function pickModel(models, modelMode, manualModelId) {
   return selectBest(models);
 }
 
-export async function callGemini(apiKey, prompt, { modelMode = MODEL_SELECTION_MODES.BEST, manualModelId, schema = CHITFORGE_RESPONSE_SCHEMA, timeoutMs = 70000, onModelStatus } = {}) {
+export async function callGemini(apiKey, prompt, { modelMode = MODEL_SELECTION_MODES.BEST, manualModelId, schema = CHITFORGE_RESPONSE_SCHEMA, timeoutMs = 70000, onModelStatus, attachments = [] } = {}) {
   const discovered = await discoverGeminiModels(apiKey);
   const ranked = discovered.compatible;
   if (!ranked.length) throw new GeminiError('No Gemini text-generation models were returned for this API key. Refresh models or check Gemini API access.', { category: 'no-generation-models' });
@@ -82,9 +83,9 @@ export async function callGemini(apiKey, prompt, { modelMode = MODEL_SELECTION_M
   for (const model of [selected, ...ranked.filter((m) => m.id !== selected.id)]) {
     onModelStatus?.({ model, mode: modelMode, fallbackLog });
     try {
-      try { return { text: await rawGenerate(apiKey, model, prompt, schema, { timeoutMs, nativeJson: true }), model, mode: modelMode, fallbackLog, usedNativeJson: true }; }
+      try { return { text: await rawGenerate(apiKey, model, prompt, schema, { timeoutMs, nativeJson: true, attachments }), model, mode: modelMode, fallbackLog, usedNativeJson: true }; }
       catch (err) {
-        if (err.category === 'http-400') { fallbackLog.push({ from: model.displayName, reason: 'structured-json-request-failed; retried plain JSON' }); return { text: await rawGenerate(apiKey, model, prompt, schema, { timeoutMs, nativeJson: false }), model, mode: modelMode, fallbackLog, usedNativeJson: false }; }
+        if (err.category === 'http-400') { fallbackLog.push({ from: model.displayName, reason: 'structured-json-request-failed; retried plain JSON' }); return { text: await rawGenerate(apiKey, model, prompt, schema, { timeoutMs, nativeJson: false, attachments }), model, mode: modelMode, fallbackLog, usedNativeJson: false }; }
         throw err;
       }
     } catch (err) {
