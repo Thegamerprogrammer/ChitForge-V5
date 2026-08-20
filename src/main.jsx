@@ -303,19 +303,20 @@ function ProgressPanel({ status, poiCount, activity }) {
 }
 
 function PortfolioIntel({ profile }) {
-  return <section className="panel intel glass-panel"><h2>Portfolio Intelligence</h2><p>{profile.summary}</p>{(profile.statements || []).map((statement, idx) => <div className="sourceCard" key={idx}><StatusBadge status={statement.status || 'MANUAL VERIFICATION'} /><p>{statement.text || statement.claim || statement}</p>{(statement.sources || profile.sources || []).slice(0, 2).map((source, i) => <SourceCard source={source} key={`${source.url}-${i}`} />)}</div>)}<div className="intelGrid">{(profile.interests || []).map((item) => <span key={item}>{item}</span>)}</div></section>;
+  return <section className="panel intel glass-panel"><h2>Portfolio Intelligence</h2><p>{profile.summary}</p>{(profile.statements || []).map((statement, idx) => <div className="sourceCard" key={idx}><StatusBadge status={statement.status || 'PENDING'} /><p>{statement.text || statement.claim || statement}</p>{(statement.sources || profile.sources || []).slice(0, 2).map((source, i) => <SourceCard source={source} key={`${source.url}-${i}`} />)}</div>)}<div className="intelGrid">{(profile.interests || []).map((item) => <span key={item}>{item}</span>)}</div></section>;
 }
 
 
 function StatusBadge({ status }) {
   const normalized = String(status || 'PENDING').toUpperCase().replace(/_/g, ' ');
+  const display = normalized === 'MANUAL VERIFICATION' ? 'VERIFICATION NEEDED' : normalized;
   const symbol = normalized === 'VERIFIED' ? '✓' : normalized === 'FAILED' ? '✕' : normalized === 'PENDING' ? '○' : '⚠';
-  return <span className={`statusBadge ${normalized.toLowerCase().replace(/\s+/g, '-')}`}>{symbol} {normalized}</span>;
+  return <span className={`statusBadge ${normalized.toLowerCase().replace(/\s+/g, '-')}`}>{symbol} {display}</span>;
 }
 
 function SourceCard({ source }) {
   const domain = source.domain || domainFromUrl(source.url);
-  return <div className="sourceCard glass-source-card"><div><b>SOURCE</b><h3>{source.sourceName || 'Source review needed'}</h3><p>Organization: {source.organization || 'MANUAL VERIFICATION'}<br />Published: {source.publicationDate || 'MANUAL VERIFICATION'}</p></div><div><b>STATUS</b><StatusBadge status={source.status || 'MANUAL VERIFICATION'} /><p><b>SOURCE QUALITY</b><br />{source.quality || 'LIMITED'}</p></div><p><b>CLAIM SUPPORTED</b><br />{source.claimSupported || source.claim || 'Claim support must be checked.'}</p>{source.searchBackend && <p><b>SEARCH BACKEND</b><br />{source.searchBackend}</p>}{source.extractionStatus && <p><b>EXTRACTION STATUS</b><br />{source.extractionStatus}</p>}{source.ddgsQuery && <p><b>DDGS QUERY</b><br />{source.ddgsQuery}</p>}{source.url && <a className="sourceLink" href={source.url} target="_blank" rel="noreferrer">OPEN SOURCE ↗ {domain && <small>{domain}</small>}</a>}{source.bangUrl && <a className="sourceLink" href={source.bangUrl} target="_blank" rel="noreferrer">OPEN DDG BANG ↗</a>}{source.verificationReason && <small>{source.verificationReason}</small>}</div>;
+  return <div className="sourceCard glass-source-card"><div><b>SOURCE</b><h3>{source.sourceName || source.title || 'Source review needed'}</h3><p>Organization: {source.organization || 'Not supplied'}<br />Published: {source.publicationDate || 'Not supplied'}</p></div><div><b>RETRIEVAL / EXTRACTION STATUS</b><StatusBadge status={source.status || source.extractionStatus || 'PENDING'} /><p><b>SOURCE QUALITY</b><br />{source.quality || 'LIMITED'}</p></div><p><b>CLAIM SUPPORTED</b><br />{source.claimSupported || source.claim || 'Claim support must be checked.'}</p>{source.searchBackend && <p><b>SEARCH BACKEND</b><br />{source.searchBackend}</p>}{source.extractionStatus && <p><b>EXTRACTION STATUS</b><br />{source.extractionStatus}</p>}{source.ddgsQuery && <p><b>DDGS QUERY</b><br />{source.ddgsQuery}</p>}{source.url && <a className="sourceLink" href={source.url} target="_blank" rel="noreferrer">ACTUAL SOURCE URL ↗ {domain && <small>{domain}</small>}</a>}{source.bangUrl && <a className="sourceLink" href={source.bangUrl} target="_blank" rel="noreferrer">SECONDARY/FALLBACK SEARCH ↗</a>}{source.verificationReason && <small>{source.verificationReason}</small>}</div>;
 }
 
 function ChitCard({ chit, number, onCopy, onFollowUp, onRegenerate }) {

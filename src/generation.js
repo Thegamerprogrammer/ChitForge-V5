@@ -388,33 +388,3 @@ export async function recoverShortfall({ form, sliders, selectedTargets, targeti
   current.metadata = { ...(current.metadata || {}), recoveryLog, partialResult: current.chits.length < poiCount, partialResultReason: current.chits.length < poiCount ? `${current.chits.length} of ${poiCount} defensible POIs generated. Additional candidates were not retained because bounded recovery could not establish enough distinct supported POIs.` : '' };
   return current;
 }
-
-export function planGenerationBatches(poiCount) {
-  const count = Number(poiCount);
-  if (!Number.isInteger(count) || count < 1 || count > MAX_POIS) throw new GeminiError('Choose a POI count from 1 to 250.', { category: 'invalid-poi-count' });
-  const batches = [];
-  let remaining = count;
-  while (remaining > 0) { const next = Math.min(GENERATION_BATCH_SIZE, remaining); batches.push(next); remaining -= next; }
-  return batches;
-}
-function naturalLanguageInstruction() { return `NATURAL LANGUAGE MODE: Write each POI like a real MUN delegate would naturally say it. Use simple, direct human English. Avoid AI-assistant, legal-memo, academic-paper, consulting-report, press-release, or template-like phrasing. Avoid filler, robotic repetition, unnecessary formalism, repeated openings, and excessive legal terminology. Prefer concise spoken simple MUN language which anyone can understand, varied sentence structures, specific references to the researched issue, and direct tactical questions. Do not make the language childish, sloppy, slang-heavy, or grammatically incorrect. Natural language must NEVER override factual accuracy, legal/policy accuracy, tactical usefulness, or requested length.`; }
-function compactPoiMetadata(chits = []) { return chits.map((chit) => ({ target: chit.target, type: chit.classification || chit.pressureProfile?.classification, factualClaim: chit.documentedIssue || chit.pressurePoint?.conflict, source: (chit.evidence || [])[0]?.url || (chit.evidence || [])[0]?.sourceName || '', tacticalAngle: chit.tacticalImpact, questionPattern: String(chit.poi || '').replace(/\*\*/g, '').split(/\s+/).slice(0, 14).join(' ') })); }
-async function generateBatchedMission({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes, researchPacket, batchSizes, modelSelection, onProgress }) {
-  let combined = null; let responseInfo = null; const previous = [];
-  for (let i = 0; i < batchSizes.length; i += 1) {
-    const batchCount = batchSizes[i];
-    onProgress?.({ stage: 'GENERATING POIs', detail: `Generating batch ${i + 1}/${batchSizes.length} (${batchCount} POIs).`, done: previous.length, total: poiCount });
-    const batchPrompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount: batchCount, poiTypes, researchPacket, batchNumber: i + 1, totalBatches: batchSizes.length, previousPoiMetadata: compactPoiMetadata(previous) });
-    const response = await callGemini(form.apiKey, batchPrompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA, attachments: i === 0 && form.backgroundGuide?.data ? [form.backgroundGuide] : [], onModelStatus: (status) => onProgress?.({ stage: 'GENERATING POIs', detail: `Using ${status.model.displayName} for batch ${i + 1}.`, done: previous.length, total: poiCount }) });
-    responseInfo = response;
-    const batchMission = await recoverMission({ apiKey: form.apiKey, text: response.text, ctx: { form, sliders, includeFollowUp, poiCount: batchCount, targetingMode, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
-    const deduped = batchMission.chits.filter((chit) => !findDuplicatePoiIndexes([...previous, chit]).includes(previous.length));
-    previous.push(...deduped);
-    combined = combined || { ...batchMission, chits: [], targets: [], recommendedTargets: [] };
-    combined.portfolioProfile = combined.portfolioProfile || batchMission.portfolioProfile;
-    combined.recommendedTargets = [...(combined.recommendedTargets || []), ...(batchMission.recommendedTargets || [])];
-  }
-  combined.chits = previous.slice(0, poiCount);
-  const groups = new Map(); combined.chits.forEach((poi) => { if (!groups.has(poi.target)) groups.set(poi.target, { country: poi.target, reasonForTargeting: poi.reasonForTargeting, pois: [] }); groups.get(poi.target).pois.push(poi); });
-  combined.targets = [...groups.values()]; combined._response = responseInfo; return combined;
-}
