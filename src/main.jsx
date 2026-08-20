@@ -107,7 +107,7 @@ function App() {
       setChits(result.chits);
       setModelInfo(result.modelInfo || null);
       setResearchPacket(result.researchPacket || null);
-      if (result.chits.length < poiCount && mode !== 'selected_only') setError({ message: `${result.chits.length} / ${poiCount} POIs generated. Gemini did not return enough distinct, defensible POIs after retry attempts. No duplicates were inserted.` });
+      if (result.metadata?.partialResultReason) pushProgress({ stage: 'FINALIZING CHITS', detail: result.metadata.partialResultReason, done: result.chits.length, total: poiCount });
       if (!result.chits.length) setError({ message: mode === 'selected_only' && !selected.length ? 'Selected Targets Only needs at least one selected target. Zero selected targets is valid in Selected + Global Research mode.' : 'No defensible targets were discovered. Try Selected + Global Research or refine the agenda.' });
     } catch (err) {
       showError(err);
@@ -315,7 +315,7 @@ function StatusBadge({ status }) {
 
 function SourceCard({ source }) {
   const domain = source.domain || domainFromUrl(source.url);
-  return <div className="sourceCard glass-source-card"><div><b>SOURCE</b><h3>{source.sourceName || 'Manual verification source'}</h3><p>Organization: {source.organization || 'MANUAL VERIFICATION'}<br />Published: {source.publicationDate || 'MANUAL VERIFICATION'}</p></div><div><b>STATUS</b><StatusBadge status={source.status || 'MANUAL VERIFICATION'} /><p><b>SOURCE QUALITY</b><br />{source.quality || 'LIMITED'}</p></div><p><b>CLAIM SUPPORTED</b><br />{source.claimSupported || source.claim || 'MANUAL VERIFICATION: claim support must be checked.'}</p>{source.ddgsQuery && <p><b>DDGS QUERY</b><br />{source.ddgsQuery}</p>}{source.url && <a className="sourceLink" href={source.url} target="_blank" rel="noreferrer">OPEN SOURCE ↗ {domain && <small>{domain}</small>}</a>}{source.bangUrl && <a className="sourceLink" href={source.bangUrl} target="_blank" rel="noreferrer">OPEN DDG BANG ↗</a>}{source.verificationReason && <small>{source.verificationReason}</small>}</div>;
+  return <div className="sourceCard glass-source-card"><div><b>SOURCE</b><h3>{source.sourceName || 'Source review needed'}</h3><p>Organization: {source.organization || 'MANUAL VERIFICATION'}<br />Published: {source.publicationDate || 'MANUAL VERIFICATION'}</p></div><div><b>STATUS</b><StatusBadge status={source.status || 'MANUAL VERIFICATION'} /><p><b>SOURCE QUALITY</b><br />{source.quality || 'LIMITED'}</p></div><p><b>CLAIM SUPPORTED</b><br />{source.claimSupported || source.claim || 'Claim support must be checked.'}</p>{source.searchBackend && <p><b>SEARCH BACKEND</b><br />{source.searchBackend}</p>}{source.extractionStatus && <p><b>EXTRACTION STATUS</b><br />{source.extractionStatus}</p>}{source.ddgsQuery && <p><b>DDGS QUERY</b><br />{source.ddgsQuery}</p>}{source.url && <a className="sourceLink" href={source.url} target="_blank" rel="noreferrer">OPEN SOURCE ↗ {domain && <small>{domain}</small>}</a>}{source.bangUrl && <a className="sourceLink" href={source.bangUrl} target="_blank" rel="noreferrer">OPEN DDG BANG ↗</a>}{source.verificationReason && <small>{source.verificationReason}</small>}</div>;
 }
 
 function ChitCard({ chit, number, onCopy, onFollowUp, onRegenerate }) {

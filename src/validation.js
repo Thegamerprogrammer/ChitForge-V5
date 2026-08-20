@@ -137,7 +137,9 @@ export function findDuplicatePoiIndexes(chits) {
       const sameClaim = normalizePoiText(chits[i].documentedIssue || chits[i].pressurePoint?.conflict) && normalizePoiText(chits[i].documentedIssue || chits[i].pressurePoint?.conflict) === normalizePoiText(chits[j].documentedIssue || chits[j].pressurePoint?.conflict);
       const sourceClaim = (chits[i].evidence || []).some((a) => (chits[j].evidence || []).some((b) => a.url && a.url === b.url && normalizePoiText(a.claimSupported || a.claim) === normalizePoiText(b.claimSupported || b.claim)));
       const targetAngle = normalizePoiText(chits[i].target) === normalizePoiText(chits[j].target) && similarity(chits[i].tacticalImpact || '', chits[j].tacticalImpact || '') > 0.75;
-      if (normalizePoiText(chits[i].poi) === normalizePoiText(chits[j].poi) || similarity(chits[i].poi, chits[j].poi) > 0.82 || sameClaim || sourceClaim || targetAngle) duplicates.add(j);
+      const sameTarget = normalizePoiText(chits[i].target) === normalizePoiText(chits[j].target);
+      const paraphrasedSamePressure = sameTarget && similarity(chits[i].poi, chits[j].poi) > 0.82;
+      if (normalizePoiText(chits[i].poi) === normalizePoiText(chits[j].poi) || paraphrasedSamePressure || sameClaim || sourceClaim || targetAngle) duplicates.add(j);
     }
   }
   return [...duplicates];

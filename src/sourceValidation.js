@@ -1,4 +1,4 @@
-export const SOURCE_STATUSES = { VERIFIED: 'VERIFIED', MANUAL: 'MANUAL VERIFICATION', FAILED: 'FAILED', PENDING: 'PENDING', DISCOVERED_NOT_RETRIEVED: 'DISCOVERED_NOT_RETRIEVED', DIRECT_EXTRACTION_BLOCKED: 'DISCOVERED_DIRECT_EXTRACTION_BLOCKED', RETRIEVED: 'RETRIEVED' };
+export const SOURCE_STATUSES = { VERIFIED: 'VERIFIED', MANUAL: 'MANUAL VERIFICATION', FAILED: 'FAILED', PENDING: 'PENDING', DISCOVERED_NOT_RETRIEVED: 'DISCOVERED_NOT_RETRIEVED', DIRECT_EXTRACTION_BLOCKED: 'DISCOVERED_DIRECT_EXTRACTION_BLOCKED', RATE_LIMITED: 'RATE_LIMITED', UPSTREAM_ERROR: 'DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR', TIMEOUT: 'DISCOVERED_NOT_RETRIEVED_TIMEOUT', NETWORK: 'DISCOVERED_NOT_RETRIEVED_NETWORK', RETRIEVED: 'RETRIEVED' };
 export const SOURCE_TYPES = ['PRIMARY', 'GOVERNMENT', 'UN', 'INTERNATIONAL_ORGANIZATION', 'COURT', 'NEWS', 'ACADEMIC', 'THINK_TANK', 'OTHER_CREDIBLE'];
 const BAD_URL = /^(?:n\/a|none|null|undefined|verification required|manual verification|example\.com|example\.org|localhost|about:blank)$/i;
 const cache = new Map();
@@ -42,13 +42,13 @@ export function validateSourceUrl(url) {
 }
 
 export function normalizeEvidenceSource(raw = {}) {
-  const sourceName = raw.sourceName || raw.source_name || raw.title || raw.source || raw.name || 'Manual verification source';
+  const sourceName = raw.sourceName || raw.source_name || raw.title || raw.source || raw.name || 'Source review needed';
   const organization = raw.organization || raw.publisher || raw.publication || raw.sourceName || raw.source_name || sourceName;
   const publicationDate = raw.publicationDate || raw.publication_date || raw.date || 'MANUAL VERIFICATION';
   const url = raw.url || raw.sourceUrl || raw.source_url || raw.link || '';
   const structural = validateSourceUrl(url);
   const sourceType = normalizeSourceType(raw.sourceType || raw.source_type || raw.sourceClassification || raw.type || organization);
-  return { sourceName, organization, publicationDate, url, claimSupported: raw.claimSupported || raw.claim || raw.text || 'MANUAL VERIFICATION: claim support must be checked.', sourceType, confidence: Number(raw.confidence || 0), quality: sourceQuality(sourceType), status: structural.status, verificationReason: structural.reason, domain: structural.domain || raw.domain || domainFromUrl(url), ddgsQuery: raw.ddgsQuery || raw.query || '', bangUrl: raw.bangUrl || raw.duckDuckGoBangUrl || raw.duckduckgo_bang_url || '', canonicalUrl: raw.canonicalUrl || raw.canonical_url || url, eventDate: raw.eventDate || raw.event_date || '', informationDate: raw.informationDate || raw.information_date || '', extractionStatus: raw.extractionStatus || raw.extraction_status || (raw.extractedText ? SOURCE_STATUSES.RETRIEVED : '') };
+  return { sourceName, organization, publicationDate, url, claimSupported: raw.claimSupported || raw.claim || raw.text || 'Claim support must be checked.', sourceType, confidence: Number(raw.confidence || 0), quality: sourceQuality(sourceType), status: structural.status, verificationReason: structural.reason, domain: structural.domain || raw.domain || domainFromUrl(url), ddgsQuery: raw.ddgsQuery || raw.query || '', bangUrl: raw.bangUrl || raw.duckDuckGoBangUrl || raw.duckduckgo_bang_url || '', canonicalUrl: raw.canonicalUrl || raw.canonical_url || url, eventDate: raw.eventDate || raw.event_date || '', informationDate: raw.informationDate || raw.information_date || '', extractionStatus: raw.extractionStatus || raw.extraction_status || (raw.extractedText ? SOURCE_STATUSES.RETRIEVED : ''), searchBackend: raw.searchBackend || raw.backend || '' };
 }
 
 export function applyFactCheckToSources(evidence = [], factCheck) {
@@ -67,6 +67,6 @@ export async function validateSources(evidence = []) {
     if (cache.has(source.url)) return { ...source, ...cache.get(source.url) };
     const structural = validateSourceUrl(source.url);
     cache.set(source.url, structural);
-    return { ...source, status: source.extractionStatus && source.extractionStatus !== SOURCE_STATUSES.RETRIEVED ? source.extractionStatus : structural.status, verificationReason: source.extractionStatus && source.extractionStatus !== SOURCE_STATUSES.RETRIEVED ? 'Discovered by DDGS but direct extraction was not retrieved.' : structural.reason, domain: structural.domain || source.domain };
+    return { ...source, status: source.extractionStatus && source.extractionStatus !== SOURCE_STATUSES.RETRIEVED ? source.extractionStatus : structural.status, verificationReason: source.extractionStatus && source.extractionStatus !== SOURCE_STATUSES.RETRIEVED ? 'Discovered by DDGS; direct page extraction did not provide retrievable content.' : structural.reason, domain: structural.domain || source.domain };
   }));
 }
