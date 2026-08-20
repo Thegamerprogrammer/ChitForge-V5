@@ -1,18 +1,18 @@
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, BorderStyle, ExternalHyperlink } from 'docx';
 import { stripMarkdown } from './format.js';
 
-function safe(value, fallback = 'MANUAL VERIFICATION') { return String(value ?? '').trim() || fallback; }
+function safe(value, fallback = 'Not supplied') { return String(value ?? '').trim() || fallback; }
 function boldRuns(text) {
   const runs = [];
   String(text || '').split(/(\*\*.*?\*\*)/g).filter(Boolean).forEach((part) => {
     const bold = part.startsWith('**') && part.endsWith('**');
     runs.push(new TextRun({ text: bold ? part.slice(2, -2) : part, bold }));
   });
-  return runs.length ? runs : [new TextRun('MANUAL VERIFICATION')];
+  return runs.length ? runs : [new TextRun('Not supplied')];
 }
 const line = (label, value) => new Paragraph({ children: [new TextRun({ text: `${label}: `, bold: true, color: 'D4AF37' }), new TextRun(safe(value))], spacing: { after: 100 } });
 const heading = (text) => new Paragraph({ text, heading: HeadingLevel.HEADING_2, spacing: { before: 280, after: 120 }, border: { top: { style: BorderStyle.SINGLE, size: 8, color: 'D4AF37' } } });
-const link = (text, url) => url ? new ExternalHyperlink({ link: url, children: [new TextRun({ text, style: 'Hyperlink' })] }) : new TextRun('MANUAL VERIFICATION');
+const link = (text, url) => url ? new ExternalHyperlink({ link: url, children: [new TextRun({ text, style: 'Hyperlink' })] }) : new TextRun('Not supplied');
 
 export async function downloadBrief({ form, sliders, portfolioProfile, chits, poiCount, selectedTargets = [], modelInfo, targetMode }) {
   const children = [
@@ -23,7 +23,7 @@ export async function downloadBrief({ form, sliders, portfolioProfile, chits, po
   ];
   chits.forEach((chit, index) => {
     children.push(heading(`POI NUMBER ${index + 1}`), line('Target', chit.target), line('Tactical Classification', chit.classification || chit.pressureProfile?.classification), new Paragraph({ children: [new TextRun({ text: 'QUESTION', bold: true, color: 'D4AF37' })], spacing: { before: 120, after: 80 } }), new Paragraph({ children: boldRuns(chit.poi), border: { left: { style: BorderStyle.SINGLE, size: 16, color: 'D4AF37' } }, spacing: { after: 160 } }), line('Documented Issue / Pressure Point', chit.documentedIssue || chit.pressurePoint?.conflict), line('Pressure Score', `${chit.pressureScore ?? chit.pressureProfile?.score}/100`), line('Verification Status', chit.factCheck?.status || 'MANUAL VERIFICATION'), line('Aggression', chit.aggression ?? sliders.aggression), line('Controversy', chit.controversy ?? sliders.controversy), line('Diplomacy', chit.diplomacy ?? sliders.diplomacy), line('Length', chit.length ?? sliders.length), line('Word Count', `${chit.wordCount} words`), line('Estimated Speaking Time', `${chit.estimatedSeconds} seconds`), line('Legal Foundation', chit.legalFoundation || chit.legalPolicyFoundation), heading('SOURCE DETAILS'));
-    (chit.evidence || []).forEach((e) => children.push(line('Source', `${safe(e.sourceName)} — ${safe(e.organization)} — ${safe(e.publicationDate)}`), line('Source Quality', e.quality || 'LIMITED'), line('Source Status', e.status || 'MANUAL VERIFICATION'), new Paragraph({ children: [new TextRun({ text: 'Source URL: ', bold: true, color: 'D4AF37' }), link('Open Source', e.url)] }), new Paragraph({ children: [new TextRun({ text: 'DuckDuckGo Search/Bang URL: ', bold: true, color: 'D4AF37' }), link('Open Bang Search', e.bangUrl)] }), line('DDGS Query', e.ddgsQuery || 'Not supplied'), line('Evidence', e.claimSupported || e.claim)));
+    (chit.evidence || []).forEach((e) => children.push(line('Source', `${safe(e.sourceName)} — ${safe(e.organization)} — ${safe(e.publicationDate)}`), line('Source Quality', e.quality || 'LIMITED'), line('Source Status', e.status || 'Not supplied'), line('Search Backend', e.searchBackend || 'Not supplied'), line('Extraction Status', e.extractionStatus || 'Not supplied'), line('Extraction/Provenance', e.verificationReason || e.status || 'Not supplied'), new Paragraph({ children: [new TextRun({ text: 'Source URL: ', bold: true, color: 'D4AF37' }), link('Open Source', e.url)] }), new Paragraph({ children: [new TextRun({ text: 'DuckDuckGo Bang URL: ', bold: true, color: 'D4AF37' }), link('Open Bang Search', e.bangUrl)] }), line('DDGS Query', e.ddgsQuery || 'Not supplied'), line('Evidence', e.claimSupported || e.claim)));
     children.push(line('Tactical Impact', chit.tacticalImpact), line('Legal Assessment', `${chit.factCheck?.legalAssessment?.status || 'UNCERTAIN'} — ${chit.factCheck?.legalAssessment?.reason || ''}`), line('Classification Assessment', `${chit.factCheck?.classificationAssessment?.status || 'UNCERTAIN'} — ${chit.factCheck?.classificationAssessment?.reason || ''}`));
     if (chit.followUp) children.push(line('Follow-up', chit.followUp.question || chit.followUp));
   });
