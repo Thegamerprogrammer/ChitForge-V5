@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=Oxanium:wght@650;750;800&display=swap');
 :root {
   color-scheme: dark;
   --glass-surface: rgba(255,255,255,.105);
@@ -684,3 +685,68 @@ button::after, .backgroundPicker::after, .sourceLink::after {
 }
 .targetSearch .muted { grid-column: 1 / -1; margin: 0; }
 @media (max-width: 760px) { .targetSearch { grid-template-columns: 1fr; } }
+
+/* Premium ChitForge title-card refinement: modern geometric typography with restrained ice-glass illumination. */
+.heroTitleBlock { position: relative; min-width: 0; }
+.titleCard {
+  position: relative;
+  display: inline-block;
+  width: auto;
+  height: auto;
+  margin: 4px 0 12px;
+  overflow: hidden;
+  isolation: isolate;
+  color: #f8fcff;
+  font-family: "Oxanium", "Eurostile", "Bank Gothic", system-ui, sans-serif;
+  font-size: clamp(48px, 7.4vw, 92px);
+  line-height: .9;
+  font-weight: 800;
+  letter-spacing: .035em;
+  text-transform: uppercase;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+  text-shadow: 0 1px 0 rgba(255,255,255,.44), 0 0 12px rgba(226,244,255,.32), 0 0 30px rgba(120,204,255,.24), 0 0 58px rgba(120,204,255,.13) !important;
+  filter: drop-shadow(0 18px 34px rgba(0,0,0,.28));
+}
+.titleCard::before {
+  content: "";
+  position: absolute;
+  inset: -24% -18%;
+  z-index: -1;
+  border-radius: 38px;
+  background: radial-gradient(ellipse at 34% 52%, rgba(120,204,255,.24), rgba(120,204,255,.10) 40%, transparent 72%);
+  pointer-events: none;
+}
+.titleCard::after {
+  content: "";
+  position: absolute;
+  inset: -8% auto -8% -38%;
+  width: 34%;
+  height: 116%;
+  margin: 0;
+  border-radius: 0;
+  opacity: .58;
+  background: linear-gradient(105deg, transparent 0 18%, rgba(255,255,255,.88) 42%, rgba(132,212,255,.42) 51%, transparent 72% 100%);
+  transform: skewX(-18deg);
+  mix-blend-mode: screen;
+  animation: titleSpecularSweep 8.5s cubic-bezier(.42,0,.18,1) infinite;
+  pointer-events: none;
+}
+.hero p { max-width: 760px; color: var(--text-secondary); }
+@keyframes titleSpecularSweep { 0%, 28% { translate: -18% 0; opacity: 0; } 42% { opacity: .58; } 68%, 100% { translate: 420% 0; opacity: 0; } }
+.country.portfolio { fill: rgba(88, 220, 132, .68); stroke: rgba(222,255,232,.98); filter: drop-shadow(0 0 12px rgba(88,220,132,.42)); }
+@media (max-width: 760px) { .titleCard { font-size: clamp(40px, 13vw, 64px); letter-spacing: .02em; } }
+@media (prefers-reduced-motion: reduce) { .titleCard::after { animation: none; opacity: 0; } }
+
+/* Specificity correction for the brand mark so earlier generic hero h1 rules cannot downgrade it. */
+.hero .titleCard {
+  font-family: "Oxanium", "Eurostile", "Bank Gothic", "Montserrat Alternates", system-ui, sans-serif;
+  font-size: clamp(48px, 7.4vw, 92px);
+  line-height: .9;
+  font-weight: 800;
+  letter-spacing: .035em;
+  text-transform: uppercase;
+  -webkit-font-smoothing: antialiased;
+  text-shadow: 0 1px 0 rgba(255,255,255,.44), 0 0 12px rgba(226,244,255,.32), 0 0 30px rgba(120,204,255,.24), 0 0 58px rgba(120,204,255,.13) !important;
+}
+@media (max-width: 760px) { .hero .titleCard { font-size: clamp(40px, 13vw, 64px); letter-spacing: .02em; } }

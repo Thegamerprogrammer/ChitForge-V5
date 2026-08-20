@@ -1,8 +1,9 @@
 const DDGS_BASE_URL = 'http://127.0.0.1:4479';
-export const DDGS_LIMITS = { minHardMax: 80, absoluteSafetyCeiling: 650, searchConcurrency: 1, extractConcurrency: 3, retries: 2, timeoutMs: 9000, paceMs: 175, backoffBaseMs: 350 };
-export const DDGS_BACKENDS = ['auto', 'bing', 'brave', 'duckduckgo', 'google', 'startpage', 'mojeek', 'yahoo'];
+export const DDGS_LIMITS = { minHardMax: 80, absoluteSafetyCeiling: 650, searchConcurrency: 1, extractConcurrency: 3, retries: 2, timeoutMs: 9000, paceMs: 175, backoffBaseMs: 350, queryMaxChars: 180 };
+export const DDGS_TEXT_BACKEND = 'duckduckgo';
+export const DDGS_BACKENDS = [DDGS_TEXT_BACKEND];
 export const SEARCH_STATUS = { SUCCESS: 'SUCCESS', NO_RESULTS_FOR_QUERY: 'NO_RESULTS_FOR_QUERY', RATE_LIMITED: 'RATE_LIMITED', TIMEOUT: 'TIMEOUT', CONNECTION_ERROR: 'CONNECTION_ERROR', DDGS_UPSTREAM_ERROR: 'DDGS_UPSTREAM_ERROR', SEARCH_FAILED: 'SEARCH_FAILED' };
-export const EXTRACTION_STATUS = { DISCOVERED: 'DISCOVERED', RETRIEVED: 'RETRIEVED', DISCOVERED_NOT_RETRIEVED: 'DISCOVERED_NOT_RETRIEVED', DISCOVERED_DIRECT_EXTRACTION_BLOCKED: 'DISCOVERED_DIRECT_EXTRACTION_BLOCKED', RATE_LIMITED: 'RATE_LIMITED', DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR: 'DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR', DISCOVERED_NOT_RETRIEVED_TIMEOUT: 'DISCOVERED_NOT_RETRIEVED_TIMEOUT', DISCOVERED_NOT_RETRIEVED_NETWORK: 'DISCOVERED_NOT_RETRIEVED_NETWORK' };
+export const EXTRACTION_STATUS = { DISCOVERED: 'DISCOVERED_FROM_SEARCH', RETRIEVED: 'RETRIEVED', DISCOVERED_NOT_RETRIEVED: 'DISCOVERED_NOT_RETRIEVED', DISCOVERED_DIRECT_EXTRACTION_BLOCKED: 'DISCOVERED_DIRECT_EXTRACTION_BLOCKED', RATE_LIMITED: 'RATE_LIMITED', DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR: 'DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR', DISCOVERED_NOT_RETRIEVED_TIMEOUT: 'DISCOVERED_NOT_RETRIEVED_TIMEOUT', DISCOVERED_NOT_RETRIEVED_NETWORK: 'DISCOVERED_NOT_RETRIEVED_NETWORK' };
 const HIGH_VALUE = [/\.gov(\.|\/|$)/i, /\.int(\.|\/|$)/i, /un\.org$/i, /worldbank\.org$/i, /imf\.org$/i, /oecd\.org$/i, /wto\.org$/i, /icj-cij\.org$/i, /reuters\.com$/i, /apnews\.com$/i, /ft\.com$/i, /bbc\./i, /bloomberg\.com$/i];
 
 export function canonicalUrl(raw = '') { try { const url = new URL(raw); url.hash = ''; ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'fbclid', 'gclid'].forEach((key) => url.searchParams.delete(key)); url.hostname = url.hostname.replace(/^www\./, '').toLowerCase(); url.pathname = url.pathname.replace(/\/$/, ''); return url.toString(); } catch { return ''; } }
@@ -48,6 +49,35 @@ export function classifyExtractionFailure({ status = 0, body = '', error } = {})
 function shouldRetrySearch(status) { return [SEARCH_STATUS.RATE_LIMITED, SEARCH_STATUS.TIMEOUT, SEARCH_STATUS.CONNECTION_ERROR, SEARCH_STATUS.DDGS_UPSTREAM_ERROR].includes(status); }
 function shouldRetryExtract(status) { return [EXTRACTION_STATUS.RATE_LIMITED, EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_TIMEOUT, EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_NETWORK, EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR].includes(status); }
 
+
+const QUERY_STOP_PHRASES = [/RECOVERY LEVEL\s+\d+:[\s\S]*/gi, /Return STRICT JSON[\s\S]*/gi, /Required JSON shape:[\s\S]*/gi, /PREVIOUS POI METADATA[\s\S]*/gi, /VALIDATION(?: PROBLEMS?| OUTPUT)?:[\s\S]*/gi, /GENERATION BATCH:[\s\S]*/gi];
+const QUERY_DROP_WORDS = /\b(generate|regenerate|defensible|pois?|candidates?|oversample|batch|schema|json|gemini|chitforge|instructions?|validation|rejected|missing|duplicate|duplicates|previous|pipeline|progress|recovering|recovery)\b/gi;
+export function normalizeDdgsQuery(raw = '') {
+  let query = String(raw || '');
+  QUERY_STOP_PHRASES.forEach((rx) => { query = query.replace(rx, ' '); });
+  query = query.replace(/[{}[\]"`]|https?:\/\/\S+/g, ' ');
+  query = query.replace(/[_:|>]+/g, ' ');
+  query = query.replace(QUERY_DROP_WORDS, ' ');
+  const words = query.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  const deduped = [];
+  const seen = new Set();
+  for (const word of words) {
+    const key = word.toLowerCase();
+    if (seen.has(key) && word.length > 3) continue;
+    seen.add(key); deduped.push(word);
+  }
+  let clean = deduped.join(' ').replace(/\s+/g, ' ').trim();
+  if (clean.length <= DDGS_LIMITS.queryMaxChars) return clean;
+  const priority = clean.split(' ').filter((word) => /[A-Z][a-z]|^[A-Z]{2,}$|\d{4}|debt|climate|finance|treaty|vote|resolution|policy|IMF|UN|World|Bank|Paris|Club|Common|Framework|sovereign|development/i.test(word));
+  clean = (priority.length >= 4 ? priority : clean.split(' ')).join(' ');
+  while (clean.length > DDGS_LIMITS.queryMaxChars && clean.includes(' ')) clean = clean.replace(/\s+\S+$/, '');
+  return clean.trim();
+}
+export function alternateQueryForNoResults(query) {
+  const clean = normalizeDdgsQuery(query).replace(/\bbefore\s+\d{4}-\d{2}-\d{2}\b/i, '').replace(/\b(scandal|malpractice|controversy)\b/gi, '').replace(/\s+/g, ' ').trim();
+  return normalizeDdgsQuery(`${clean} official report policy source`);
+}
+
 function contentSignature(result = {}) { return `${result.title || ''} ${result.body || result.snippet || ''}`.toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/[^a-z0-9]+/g, ' ').split(' ').filter((word) => word.length > 4).slice(0, 18).join(' '); }
 function scoreResult(result, missionText) { const hay = `${result.title || ''} ${result.body || result.snippet || ''} ${result.href || ''}`.toLowerCase(); const terms = missionText.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 4); const matches = new Set(terms.filter((term) => hay.includes(term))).size; const domain = domainFromResult(result.href); return matches + (HIGH_VALUE.some((rx) => rx.test(domain)) ? 8 : 0) + (/pdf|treaty|resolution|report|statement|vote|voting|policy|foreign|official|court|law/i.test(hay) ? 3 : 0); }
 
@@ -60,7 +90,7 @@ export function buildResearchQueries({ form, sliders, selectedTargets = [], targ
   const queries = [`${base} ${freeze} official foreign policy doctrine strategic priorities`, `${base} ${freeze} UN resolution voting record treaty commitments`, `${base} ${targets} ${freeze} government statements policy contradiction`, `${base} ${targets} ${freeze} international organization report legal framework`, ...controversy.map((x) => `${base} ${targets} ${freeze} ${x}`), ...aggression.map((x) => `${base} ${targets} ${freeze} ${x}`), `${form.portfolio} foreign policy ${form.agenda} ${freeze}`, `${targets} foreign policy ${form.agenda} ${freeze}`, ...(poiTypes || []).filter((t) => t !== 'AUTO').slice(0, 4).map((type) => `${base} ${targets} ${type} ${freeze}`)];
   if (form.backgroundGuideName) queries.push(`${base} ${form.backgroundGuideName} background guide ${freeze}`);
   if (targetingMode !== 'selected_only') queries.push(`${base} automatic target countries relevant controversy ${freeze}`);
-  return [...new Set(queries.map((q) => q.replace(/\s+/g, ' ').trim()).filter(Boolean))].slice(0, 14);
+  return [...new Set(queries.map(normalizeDdgsQuery).filter(Boolean))].slice(0, 14);
 }
 
 export function deriveAutomaticTargetCandidates({ form, sources = [], selectedTargets = [] }) {
@@ -84,25 +114,28 @@ async function searchTextOnce(query, maxResults, backend, { fetchImpl = fetch, b
   } catch (error) { return { ok: false, status: classifySearchFailure({ error }), httpStatus: 0, backend, query, error, results: [] }; }
 }
 export function alternateQueries(query) {
-  const withoutFreeze = query.replace(/\bbefore\s+\d{4}-\d{2}-\d{2}/i, '').trim();
-  const compact = query.split(/\s+/).filter((word) => !/^(scandal|malpractice|controversy|contradiction)$/i.test(word)).join(' ');
-  return [...new Set([withoutFreeze, `${compact} official source`, `${compact} treaty policy voting record`, `${compact} report`, `${compact} implementation failure`].map((q) => q.replace(/\s+/g, ' ').trim()).filter(Boolean).filter((q) => q !== query))].slice(0, 4);
+  const alternate = alternateQueryForNoResults(query);
+  const normalized = normalizeDdgsQuery(query);
+  return alternate && alternate !== normalized ? [alternate] : [];
 }
-export async function searchWithBackendFallback(query, maxResults = 10, { backends = DDGS_BACKENDS, fetchImpl = fetch, baseUrl = DDGS_BASE_URL, onAttempt } = {}) {
+export async function searchWithBackendFallback(query, maxResults = 10, { fetchImpl = fetch, baseUrl = DDGS_BASE_URL, onAttempt } = {}) {
   const attempts = [];
-  for (const intentQuery of [query, ...alternateQueries(query)]) {
-    for (const backend of backends) {
-      for (let attempt = 0; attempt <= DDGS_LIMITS.retries; attempt += 1) {
-        if (attempt) await sleep(jitter(DDGS_LIMITS.backoffBaseMs * (2 ** (attempt - 1))));
-        const result = await searchTextOnce(intentQuery, maxResults, backend, { fetchImpl, baseUrl });
-        attempts.push({ query: intentQuery, backend, status: result.status, httpStatus: result.httpStatus }); onAttempt?.(attempts.at(-1));
-        if (result.results.length) return { ...result, attempts };
-        if (result.status === SEARCH_STATUS.NO_RESULTS_FOR_QUERY) break;
-        if (!shouldRetrySearch(result.status)) break;
-      }
+  const backend = DDGS_TEXT_BACKEND;
+  const normalized = normalizeDdgsQuery(query);
+  const intentQueries = [...new Set([normalized, ...alternateQueries(normalized)].filter(Boolean))].slice(0, 2);
+  for (let queryIndex = 0; queryIndex < intentQueries.length; queryIndex += 1) {
+    const intentQuery = intentQueries[queryIndex];
+    const maxAttempts = queryIndex === 0 ? DDGS_LIMITS.retries : 0;
+    for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
+      if (attempt) await sleep(jitter(DDGS_LIMITS.backoffBaseMs * (2 ** (attempt - 1))));
+      const result = await searchTextOnce(intentQuery, maxResults, backend, { fetchImpl, baseUrl });
+      attempts.push({ query: intentQuery, backend, status: result.status, httpStatus: result.httpStatus }); onAttempt?.(attempts.at(-1));
+      if (result.results.length) return { ...result, attempts };
+      if (result.status === SEARCH_STATUS.NO_RESULTS_FOR_QUERY) break;
+      if (!shouldRetrySearch(result.status)) break;
     }
   }
-  return { ok: false, status: attempts.at(-1)?.status || SEARCH_STATUS.SEARCH_FAILED, query, backend: attempts.at(-1)?.backend || backends[0], results: [], attempts };
+  return { ok: false, status: attempts.at(-1)?.status || SEARCH_STATUS.SEARCH_FAILED, query: normalized, backend, results: [], attempts };
 }
 async function extractOnce(source, { fetchImpl = fetch, baseUrl = DDGS_BASE_URL } = {}) {
   try {
@@ -123,11 +156,11 @@ function sourceFromResult(result, query, backend, missionText) { const url = can
 
 export async function discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount = 20, recoveryFocus = '', onProgress }) {
   const health = await checkDdgsHealth();
-  const queries = buildResearchQueries({ form: recoveryFocus ? { ...form, researchNotes: `${form.researchNotes || ''} ${recoveryFocus}` } : form, sliders, selectedTargets, targetingMode, poiTypes });
+  const queries = buildResearchQueries({ form, sliders, selectedTargets, targetingMode, poiTypes });
   if (!health.ok) return { schema: 'DDGS API /search/text + /extract (OpenAPI 3.1.0)', health, queries, sources: [], retrievedSources: [], bangUrls: [], automaticTargetCandidates: [], failures: [{ status: 'DDGS_API_UNAVAILABLE', detail: health.detail }], stats: { queryCount: queries.length, discoveredUrls: 0, retainedUrls: 0, retrievedSources: 0, bangUrls: 0, hardMax: 0, softMax: 0, preferredRange: '0-0', adaptiveCeiling: 0, absoluteSafetyCeiling: DDGS_LIMITS.absoluteSafetyCeiling } };
   const budget = planResearchBudget({ poiCount, selectedTargets, sliders, form, coverageGaps: recoveryFocus ? 2 : 0 });
   const byUrl = new Map(); const contentSignatures = new Set(); const failures = []; let staleRounds = 0;
-  const missionText = [form.committee, form.agenda, form.portfolio, form.researchNotes, recoveryFocus].join(' ');
+  const missionText = [form.committee, form.agenda, form.portfolio, form.researchNotes].join(' ');
   for (const query of queries) {
     if (byUrl.size >= budget.softMax && staleRounds >= 2) break;
     onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `DDGS URL discovery: ${byUrl.size}/${budget.softMax} retained.`, done: byUrl.size, total: budget.softMax });

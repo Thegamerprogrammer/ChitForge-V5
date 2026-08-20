@@ -3,6 +3,7 @@ import { geoCentroid, geoNaturalEarth1, geoPath } from 'd3-geo';
 import { feature } from 'topojson-client';
 import world from 'world-atlas/countries-50m.json';
 import countryList from 'world-countries';
+import { countryMatchesPortfolio, toggleTargetSelection } from './mapInteractions.js';
 
 const numericToCountry = new Map(countryList.filter((c) => c.ccn3).map((c) => [c.ccn3, { iso: c.cca3, name: c.name.common }]));
 export const countryAliases = new Map([
@@ -51,7 +52,7 @@ function normalizeCountry(geo) {
   return byId || byName || { iso: String(geo.id), name: geo.properties.name };
 }
 
-export function WorldMap({ selected, setSelected, portfolio }) {
+export function WorldMap({ selected, setSelected, portfolio, setPortfolio }) {
   const [tooltip, setTooltip] = useState(null);
   const tooltipFrame = useRef(0);
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
@@ -64,13 +65,17 @@ export function WorldMap({ selected, setSelected, portfolio }) {
     return fc.features.map((geo) => { const [cx, cy] = projection(geoCentroid(geo)) || []; const normalized = normalizeCountry(geo); return { ...normalized, d: path(geo), cx, cy, smallHit: ['SGP','MCO','LIE','LUX','MLT','MDV','BRN','VAT','SMR','AND','KWT','QAT','BHR'].includes(normalized.iso) }; }).filter((c) => c.d && c.iso !== '010');
   }, []);
   const selectedIso = new Set(selected.map((c) => c.iso));
-  const portfolioText = portfolio.trim().toLowerCase();
   const applyTransform = useCallback((nextView) => {
     mapGroupRef.current?.setAttribute('transform', `translate(${nextView.x} ${nextView.y}) scale(${nextView.scale})`);
   }, []);
-  const toggle = (country) => {
+  const choosePortfolio = (country) => {
     if (dragRef.current.moved) return;
-    setSelected(selectedIso.has(country.iso) ? selected.filter((c) => c.iso !== country.iso) : [...selected, { iso: country.iso, name: country.name }]);
+    setPortfolio?.(country);
+  };
+  const handleContextMenu = (event, country) => {
+    event.preventDefault();
+    if (dragRef.current.moved) return;
+    setSelected((current) => toggleTargetSelection(current, country, portfolio));
   };
   const moveTooltip = useCallback((event, country) => {
     const { offsetX, offsetY } = event.nativeEvent;
@@ -117,11 +122,11 @@ export function WorldMap({ selected, setSelected, portfolio }) {
       <rect className="ocean" width="980" height="520" />
       <g ref={mapGroupRef} transform={`translate(${view.x} ${view.y}) scale(${view.scale})`}>
       {countries.map((country) => {
-        const isPortfolio = portfolioText && (country.iso.toLowerCase() === portfolioText || country.name.toLowerCase() === portfolioText);
+        const isPortfolio = countryMatchesPortfolio(country, portfolio);
         const isSelected = selectedIso.has(country.iso);
-        return <path key={`${country.iso}-${country.name}`} tabIndex="0" d={country.d} data-iso={country.iso} className={`country ${isSelected ? 'selected' : ''} ${isPortfolio ? 'portfolio' : ''} ${isPortfolio && isSelected ? 'selfTarget' : ''}`} onClick={() => toggle(country)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggle(country); }} onMouseMove={(e) => moveTooltip(e, country)} onMouseLeave={hideTooltip}><title>{country.name} · {country.iso}</title></path>;
+        return <path key={`${country.iso}-${country.name}`} tabIndex="0" d={country.d} data-iso={country.iso} className={`country ${isSelected ? 'selected' : ''} ${isPortfolio ? 'portfolio' : ''} ${isPortfolio && isSelected ? 'selfTarget' : ''}`} onClick={() => choosePortfolio(country)} onContextMenu={(e) => handleContextMenu(e, country)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') choosePortfolio(country); }} onMouseMove={(e) => moveTooltip(e, country)} onMouseLeave={hideTooltip}><title>{country.name} · {country.iso}</title></path>;
       })}
-      {countries.filter((country) => country.smallHit && Number.isFinite(country.cx) && Number.isFinite(country.cy)).map((country) => <circle key={`hit-${country.iso}`} className="countryHitArea" cx={country.cx} cy={country.cy} r="8" tabIndex="0" aria-label={`${country.name} ${country.iso}`} onClick={() => toggle(country)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggle(country); }} onMouseMove={(e) => moveTooltip(e, country)} onMouseLeave={hideTooltip}><title>{country.name} · {country.iso}</title></circle>)}
+      {countries.filter((country) => country.smallHit && Number.isFinite(country.cx) && Number.isFinite(country.cy)).map((country) => <circle key={`hit-${country.iso}`} className="countryHitArea" cx={country.cx} cy={country.cy} r="8" tabIndex="0" aria-label={`${country.name} ${country.iso}`} onClick={() => choosePortfolio(country)} onContextMenu={(e) => handleContextMenu(e, country)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') choosePortfolio(country); }} onMouseMove={(e) => moveTooltip(e, country)} onMouseLeave={hideTooltip}><title>{country.name} · {country.iso}</title></circle>)}
       </g>
     </svg>
     {tooltip && <div className="tooltip show" style={{ left: tooltip.x, top: tooltip.y }}><b>{tooltip.name}</b><br />ISO {tooltip.iso}</div>}
