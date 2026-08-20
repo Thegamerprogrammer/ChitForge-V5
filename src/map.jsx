@@ -5,7 +5,7 @@ import world from 'world-atlas/countries-50m.json';
 import countryList from 'world-countries';
 
 const numericToCountry = new Map(countryList.filter((c) => c.ccn3).map((c) => [c.ccn3, { iso: c.cca3, name: c.name.common }]));
-const aliases = new Map([
+export const countryAliases = new Map([
   ['United States of America', { iso: 'USA', name: 'United States' }],
   ['Dem. Rep. Congo', { iso: 'COD', name: 'Democratic Republic of the Congo' }],
   ['Congo', { iso: 'COG', name: 'Republic of the Congo' }],
@@ -19,11 +19,35 @@ const aliases = new Map([
   ['Venezuela', { iso: 'VEN', name: 'Venezuela' }],
   ['Bolivia', { iso: 'BOL', name: 'Bolivia' }],
   ['Tanzania', { iso: 'TZA', name: 'Tanzania' }],
+  ['USA', { iso: 'USA', name: 'United States' }],
+  ['US', { iso: 'USA', name: 'United States' }],
+  ['UK', { iso: 'GBR', name: 'United Kingdom' }],
+  ['UAE', { iso: 'ARE', name: 'United Arab Emirates' }],
+  ['SG', { iso: 'SGP', name: 'Singapore' }],
+  ['SGP', { iso: 'SGP', name: 'Singapore' }],
 ]);
+
+export const countryDatabase = countryList.map((c) => ({ iso: c.cca3, iso2: c.cca2, name: c.name.common, official: c.name.official, aliases: [c.name.common, c.name.official, ...(Object.values(c.translations || {}).map((t) => t.common).filter(Boolean))] })).filter((c) => c.iso);
+
+function key(value = '') { return String(value).trim().toLowerCase().replace(/^the\s+/, '').replace(/[^a-z0-9]+/g, ' ').trim(); }
+
+export function resolveCountries(input) {
+  const tokens = String(input || '').split(/[;,\n]+/).map((x) => x.trim()).filter(Boolean);
+  const resolved = []; const unresolved = [];
+  const add = (country) => { if (country && !resolved.some((c) => c.iso === country.iso)) resolved.push({ iso: country.iso, name: country.name }); };
+  for (const token of tokens) {
+    const alias = countryAliases.get(token) || countryAliases.get(token.toUpperCase());
+    if (alias) { add(alias); continue; }
+    const k = key(token);
+    const found = countryDatabase.find((c) => [c.iso, c.iso2].some((code) => code?.toLowerCase() === token.toLowerCase()) || c.aliases.some((a) => key(a) === k));
+    if (found) add(found); else unresolved.push(token);
+  }
+  return { resolved, unresolved };
+}
 
 function normalizeCountry(geo) {
   const byId = numericToCountry.get(String(geo.id).padStart(3, '0'));
-  const byName = aliases.get(geo.properties.name);
+  const byName = countryAliases.get(geo.properties.name);
   return byId || byName || { iso: String(geo.id), name: geo.properties.name };
 }
 

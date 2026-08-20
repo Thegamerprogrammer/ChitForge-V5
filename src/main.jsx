@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { LIQUID_GLASS_PROFILES, createLiquidGlassMap } from './liquidGlass.js';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
-import { WorldMap } from './map.jsx';
+import { WorldMap, resolveCountries } from './map.jsx';
 import { loadStoredKey, saveApiKey, clearStoredKey } from './state.js';
 import { generateFollowUp, generateMission, regenerateChit, lengthInfo } from './generation.js';
 import { discoverGeminiModels, refreshModelCapabilities, MODEL_SELECTION_MODES } from './gemini.js';
@@ -26,6 +26,9 @@ function App() {
   const [showKey, setShowKey] = useState(false);
   const [sliders, setSliders] = useState(defaultSliders);
   const [poiCount, setPoiCount] = useState(5);
+  const [naturalLanguage, setNaturalLanguage] = useState(false);
+  const [targetSearch, setTargetSearch] = useState('');
+  const [targetSearchReport, setTargetSearchReport] = useState(null);
   const [selected, setSelected] = useState([]);
   const [mode, setMode] = useState('selected_global');
   const [includeFollowUp, setIncludeFollowUp] = useState(false);
@@ -69,6 +72,15 @@ function App() {
   const pushProgress = (next) => { setStatus(next); setActivity((items) => [{ time: new Date().toLocaleTimeString(), stage: next.stage, detail: next.detail, done: next.done, total: next.total }, ...items].slice(0, 14)); };
 
   const modelSelection = { modelMode, manualModelId };
+  const sameCountryText = (country, value) => { const raw = String(value || '').trim().toLowerCase(); return raw && (country.iso.toLowerCase() === raw || country.name.toLowerCase() === raw); };
+  const generationTargets = selected.filter((country) => !sameCountryText(country, form.portfolio));
+  const applyTargetSearch = () => {
+    const { resolved, unresolved } = resolveCountries(targetSearch);
+    const allowed = resolved.filter((country) => !sameCountryText(country, form.portfolio));
+    const blocked = resolved.filter((country) => sameCountryText(country, form.portfolio)).map((country) => country.name);
+    setSelected((current) => [...current, ...allowed.filter((country) => !current.some((item) => item.iso === country.iso))]);
+    setTargetSearchReport({ resolved: allowed.map((country) => country.name), unresolved, blocked });
+  };
   const refreshModels = async (verify = false) => {
     if (!form.apiKey.trim()) { setError({ message: 'Missing Gemini API key. Enter your key and try again.' }); return; }
     setModelLoading(true); setError(null);
@@ -89,7 +101,7 @@ function App() {
     setRecommendations([]);
     try {
       setActivity([]);
-      const result = await generateMission({ form, sliders, selectedTargets: selected, targetingMode: mode, includeFollowUp, poiCount, poiTypes, onProgress: pushProgress, modelSelection });
+      const result = await generateMission({ form: { ...form, naturalLanguage }, sliders, selectedTargets: generationTargets, targetingMode: mode, includeFollowUp, poiCount: Number(poiCount), poiTypes, onProgress: pushProgress, modelSelection });
       setPortfolioProfile(result.portfolioProfile);
       setRecommendations(result.recommendedTargets || []);
       setChits(result.chits);
@@ -126,7 +138,7 @@ function App() {
   const copyText = (text) => navigator.clipboard?.writeText(text).catch(() => setError({ message: 'Clipboard access was blocked by the browser.' }));
   const copyAll = () => copyText(chits.map((chit, index) => `POI ${index + 1} — ${chit.target}\n${chit.poi}`).join('\n\n'));
   const exportBrief = (items = chits) => {
-    try { pushProgress({ stage: 'PREPARING DOCX', detail: 'Preparing professional DOCX tactical brief.', done: items.length, total: items.length || 1 }); downloadBrief({ form, sliders, portfolioProfile, chits: items, poiCount, selectedTargets: selected, modelInfo, targetMode: mode }); }
+    try { pushProgress({ stage: 'PREPARING DOCX', detail: 'Preparing professional DOCX tactical brief.', done: items.length, total: items.length || 1 }); downloadBrief({ form, sliders, portfolioProfile, chits: items, poiCount, selectedTargets: generationTargets, modelInfo, targetMode: mode }); }
     catch { setError({ message: 'DOCX export failed. Please try again in a modern browser.' }); }
   };
 
@@ -169,7 +181,8 @@ function App() {
         </div>
         <h2>Targeting Mode</h2>
         <div className="modes">{modes.map(([id, label, help]) => <label key={id} className="mode"><input type="radio" checked={mode === id} onChange={() => setMode(id)} /> <b>{label}</b><small>{help}</small></label>)}</div>
-        <label>POIs to Generate<input type="number" min="1" max="20" value={poiCount} onChange={(e) => setPoiCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))} /></label>
+        <label>POIs to Generate<input type="number" min="1" max="250" step="1" value={poiCount} onChange={(e) => setPoiCount(e.target.value === '' ? '' : Number(e.target.value))} /></label>
+        <label className="check switchField"><input type="checkbox" checked={naturalLanguage} onChange={(e) => setNaturalLanguage(e.target.checked)} /><span className="glassSwitch" aria-hidden="true"><i /></span><span>Natural Language</span></label>
         <label className="check switchField"><input type="checkbox" checked={includeFollowUp} onChange={(e) => setIncludeFollowUp(e.target.checked)} /><span className="glassSwitch" aria-hidden="true"><i /></span><span>Generate Follow-Up</span></label>
         <h2>POI Type</h2>
         <div className="typeGrid" role="group" aria-label="POI type selection">{POI_TYPES.map((type) => <label key={type} className={`typeChip ${poiTypes.includes(type) ? 'active' : ''}`}>
@@ -186,8 +199,8 @@ function App() {
         <button className="primary" onClick={runGeneration} disabled={busy}>{busy ? 'Synthesizing Tactical POIs…' : 'Generate Tactical POI Array'}</button>
         {error && <ErrorBox error={error} />}
       </section>
-      <section className="panel mapPanel"><h2>Real World Target Map</h2><MemoWorldMap selected={selected} setSelected={setSelected} portfolio={form.portfolio} /></section>
-      <aside className="panel queue glass-sidebar"><details className="settingsPanel" open><summary>Generation Settings</summary><div className="settingsGrid"><span>POI Count<b>{poiCount}</b></span><span>POI Type<b>{poiTypes.join(', ')}</b></span><span>Target Mode<b>{mode}</b></span><span>Follow-ups<b>{includeFollowUp ? 'ON' : 'OFF'}</b></span><span>Model<b>{modelInfo?.model?.displayName || modelMode}</b></span><span>Aggression<b>{sliders.aggression}</b></span><span>Controversy<b>{sliders.controversy}</b></span><span>Diplomacy<b>{sliders.diplomacy}</b></span><span>Length<b>{sliders.length}</b></span><span>Freeze Date<b>{form.freezeDate || 'None'}</b></span><span>DDGS URLs<b>{researchPacket?.stats?.retainedUrls ?? 0}</b></span></div><GlassRange name="opacity" value={uiOpacity} onCommit={commitOpacity} /></details><h2>Selected Targets</h2>{selected.length ? selected.map((c) => <button key={c.iso} className="pill" onClick={() => setSelected(selected.filter((x) => x.iso !== c.iso))}>{c.name}<span>{c.iso}</span>×</button>) : <p className="muted">No manual targets selected. Auto-discovery can generate anyway.</p>}<button onClick={() => setSelected([])}>Clear selections</button>{recommendations.length > 0 && <><h2>AI Recommended Targets</h2>{recommendations.map((target) => <div className="recommendation" key={`${target.name}-${target.reason}`}><b>{target.name}</b><small>{target.reason}</small></div>)}</>}{(busy || status) && <ProgressPanel status={status} poiCount={poiCount} activity={activity} />}</aside>
+      <section className="panel mapPanel"><h2>Real World Target Map</h2><div className="targetSearch"><label>Target Search<input value={targetSearch} onChange={(e) => setTargetSearch(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') applyTargetSearch(); }} placeholder="China, USA, UK, SGP" /></label><button type="button" onClick={applyTargetSearch}>Add Targets</button>{targetSearchReport && <p className="muted">{targetSearchReport.resolved.length ? `Selected: ${targetSearchReport.resolved.join(', ')}. ` : ''}{targetSearchReport.blocked.length ? `Blocked portfolio: ${targetSearchReport.blocked.join(', ')}. ` : ''}{targetSearchReport.unresolved.length ? `Unresolved: ${targetSearchReport.unresolved.join(', ')}.` : ''}</p>}</div><MemoWorldMap selected={selected} setSelected={setSelected} portfolio={form.portfolio} /></section>
+      <aside className="panel queue glass-sidebar"><details className="settingsPanel" open><summary>Generation Settings</summary><div className="settingsGrid"><span>POI Count<b>{poiCount}</b></span><span>POI Type<b>{poiTypes.join(', ')}</b></span><span>Target Mode<b>{mode}</b></span><span>Natural Language<b>{naturalLanguage ? 'ON' : 'OFF'}</b></span><span>Follow-ups<b>{includeFollowUp ? 'ON' : 'OFF'}</b></span><span>Model<b>{modelInfo?.model?.displayName || modelMode}</b></span><span>Aggression<b>{sliders.aggression}</b></span><span>Controversy<b>{sliders.controversy}</b></span><span>Diplomacy<b>{sliders.diplomacy}</b></span><span>Length<b>{sliders.length}</b></span><span>Freeze Date<b>{form.freezeDate || 'None'}</b></span><span>DDGS URLs<b>{researchPacket?.stats?.retainedUrls ?? 0}</b></span></div><GlassRange name="opacity" value={uiOpacity} onCommit={commitOpacity} /></details><h2>Selected Targets</h2>{selected.length ? selected.map((c) => <button key={c.iso} className="pill" onClick={() => setSelected(selected.filter((x) => x.iso !== c.iso))}>{c.name}<span>{c.iso}</span>×</button>) : <p className="muted">No manual targets selected. Auto-discovery can generate anyway.</p>}<button onClick={() => setSelected([])}>Clear selections</button>{recommendations.length > 0 && <><h2>AI Recommended Targets</h2>{recommendations.map((target) => <div className="recommendation" key={`${target.name}-${target.reason}`}><b>{target.name}</b><small>{target.reason}</small></div>)}</>}{(busy || status) && <ProgressPanel status={status} poiCount={poiCount} activity={activity} />}</aside>
     </main>
     {portfolioProfile && <PortfolioIntel profile={portfolioProfile} />}
     {chits.length > 0 && <section className="poiWindow"><div className="arrayHeader"><div><span className="eyebrow">CHITFORGE</span><h2>TACTICAL POI ARRAY</h2><strong>{chits.length} / {poiCount} POIs GENERATED</strong>{modelInfo?.model && <strong>MODEL: {modelInfo.model.displayName}</strong>}<strong>FACT CHECK: 2-PASS</strong></div><div className="actions"><button onClick={copyAll}>Copy All</button><button onClick={() => exportBrief()}>Download DOCX</button><button onClick={runGeneration} disabled={busy}>Regenerate All</button></div></div><div className="chits">{chits.map((chit, i) => <ChitCard key={`${chit.target}-${i}-${chit.poi}`} chit={chit} number={i + 1} onCopy={copyText} onExport={() => exportBrief([chit])} onFollowUp={() => addFollowUp(i)} onRegenerate={() => regenerateOne(i)} />)}</div></section>}

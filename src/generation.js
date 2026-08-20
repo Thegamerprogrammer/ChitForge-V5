@@ -4,29 +4,40 @@ import { toInternalMission, validateInternalMission, extractJson } from './respo
 import { applyFactCheckToSources, validateSources } from './sourceValidation.js';
 import { discoverResearch } from './ddgsResearch.js';
 
+const MAX_POIS = 250;
+const GENERATION_BATCH_SIZE = 25;
+
 export async function generateMission({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes = ['AUTO'], onProgress, modelSelection }) {
   onProgress?.({ stage: 'INITIALIZING', detail: 'Initializing ChitForge synthesis engine.', done: 0, total: poiCount });
   onProgress?.({ stage: 'READING AGENDA', detail: 'Reading committee, agenda and portfolio inputs.', done: 0, total: poiCount });
   onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: 'Starting official DDGS API URL discovery.', done: 0, total: 60 });
-  const researchPacket = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, onProgress });
+  const researchPacket = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount, onProgress });
   const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes, researchPacket });
   onProgress?.({ stage: 'ANALYZING PORTFOLIO', detail: 'Analyzing portfolio foreign-policy interests.', done: 0, total: poiCount });
   onProgress?.({ stage: 'ANALYZING FOREIGN POLICY', detail: 'Mapping foreign-policy alignment and constraints.', done: 0, total: poiCount });
   onProgress?.({ stage: 'MAPPING TARGETS', detail: 'Mapping selected and global target opportunities.', done: 0, total: poiCount });
   onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: 'Requesting traceable source-backed evidence.', done: 0, total: poiCount });
   onProgress?.({ stage: 'ANALYZING LEGAL FRAMEWORKS', detail: 'Separating legal obligations from political commitments.', done: 0, total: poiCount });
-  let response = await callGemini(form.apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA, attachments: form.backgroundGuide?.data ? [form.backgroundGuide] : [], onModelStatus: (status) => onProgress?.({ stage: 'MAPPING TARGETS', detail: `Using ${status.model.displayName} for ${status.mode}.`, done: 0, total: poiCount }) });
-  let text = response.text;
-  let mission = await recoverMission({ apiKey: form.apiKey, text, ctx: { form, sliders, includeFollowUp, poiCount, targetingMode, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
+  const batchSizes = planGenerationBatches(poiCount);
+  let response;
+  let mission;
+  if (batchSizes.length === 1) {
+    response = await callGemini(form.apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA, attachments: form.backgroundGuide?.data ? [form.backgroundGuide] : [], onModelStatus: (status) => onProgress?.({ stage: 'MAPPING TARGETS', detail: `Using ${status.model.displayName} for ${status.mode}.`, done: 0, total: poiCount }) });
+    mission = await recoverMission({ apiKey: form.apiKey, text: response.text, ctx: { form, sliders, includeFollowUp, poiCount, targetingMode, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
+  } else {
+    mission = await generateBatchedMission({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes, researchPacket, batchSizes, modelSelection, onProgress });
+    response = mission._response;
+    delete mission._response;
+  }
   const duplicates = findDuplicatePoiIndexes(mission.chits);
   if (duplicates.length) {
     onProgress?.({ stage: 'GENERATING POIs', detail: `Replacing ${duplicates.length} duplicate POI(s)...`, done: mission.chits.length - duplicates.length, total: poiCount });
-    mission = await replaceDuplicatePois({ form, sliders, includeFollowUp, mission, duplicates, poiCount, modelSelection });
+    mission = await replaceDuplicatePois({ form, sliders, includeFollowUp, mission, duplicates, poiCount, modelSelection, researchPacket });
   }
   const missing = Math.max(0, poiCount - mission.chits.length);
   if (missing) {
     onProgress?.({ stage: 'GENERATING POIs', detail: `Gemini returned ${mission.chits.length}/${poiCount}. Attempting ${missing} missing POI(s)...`, done: mission.chits.length, total: poiCount });
-    mission = await generateMissingPois({ form, sliders, selectedTargets, targetingMode, includeFollowUp, mission, missing, poiCount, poiTypes, modelSelection });
+    mission = await generateMissingPois({ form, sliders, selectedTargets, targetingMode, includeFollowUp, mission, missing, poiCount, poiTypes, modelSelection, researchPacket });
   }
   onProgress?.({ stage: 'VALIDATING STRUCTURE', detail: `${mission.chits.length}/${poiCount} usable POIs normalized. Validating source structures...`, done: mission.chits.length, total: poiCount });
   mission.chits = await Promise.all(mission.chits.map(async (poi) => ({ ...poi, evidence: await validateSources(poi.evidence || []) })));
@@ -39,7 +50,7 @@ export async function generateMission({ form, sliders, selectedTargets, targetin
 
 export async function regenerateChit({ form, sliders, chit, existingChits, apiKey, includeFollowUp, onProgress, modelSelection }) {
   onProgress?.({ stage: 'GENERATING POIs', detail: `Regenerating POI for ${chit.target}...`, done: 0, total: 1 });
-  const prompt = `Return STRICT JSON only, no markdown fences. Regenerate exactly 1 distinct ChitForge POI to replace the weak POI below. Use the same agenda, portfolio, target, slider profile, evidence standards, simple English, no ceremonial opening, and Markdown bold emphasis. Do not duplicate these existing POIs: ${JSON.stringify(existingChits.map((item) => item.poi))}.\nAGENDA: ${form.agenda}\nPORTFOLIO: ${form.portfolio}\nTARGET: ${chit.target}\nSLIDERS: ${JSON.stringify(sliders)}\nFOLLOW-UP: ${includeFollowUp ? 'GENERATE' : 'DO NOT GENERATE'}\nOLD CHIT: ${JSON.stringify(chit)}\nReturn schema {"research_summary":"...","portfolio_alignment":"...","targets":[{"country":"${chit.target}","pressure_points":[{"poi":"...","legal_foundation":"...","evidence":[{"claim":"...","source_name":"...","source_url":"..."}],"documented_contradiction":"...","tactical_impact":"...","classification":"...","follow_up":${includeFollowUp ? '"..."' : 'null'}}]}]}`;
+  const prompt = `${form.naturalLanguage ? naturalLanguageInstruction() : ''}\nReturn STRICT JSON only, no markdown fences. Regenerate exactly 1 distinct ChitForge POI to replace the weak POI below. Use the same agenda, portfolio, target, slider profile, evidence standards, simple English, no ceremonial opening, and Markdown bold emphasis. Do not duplicate these existing POIs: ${JSON.stringify(existingChits.map((item) => item.poi))}.\nAGENDA: ${form.agenda}\nPORTFOLIO: ${form.portfolio}\nTARGET: ${chit.target}\nSLIDERS: ${JSON.stringify(sliders)}\nFOLLOW-UP: ${includeFollowUp ? 'GENERATE' : 'DO NOT GENERATE'}\nOLD CHIT: ${JSON.stringify(chit)}\nReturn schema {"research_summary":"...","portfolio_alignment":"...","targets":[{"country":"${chit.target}","pressure_points":[{"poi":"...","legal_foundation":"...","evidence":[{"claim":"...","source_name":"...","source_url":"..."}],"documented_contradiction":"...","tactical_impact":"...","classification":"...","follow_up":${includeFollowUp ? '"..."' : 'null'}}]}]}`;
   const response = await callGemini(apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA });
   const text = response.text;
   const mission = await recoverMission({ apiKey, text, ctx: { form, sliders, includeFollowUp, poiCount: 1, targetingMode: 'regenerate', lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
@@ -51,7 +62,7 @@ export async function regenerateChit({ form, sliders, chit, existingChits, apiKe
 
 export async function generateFollowUp({ form, sliders, chit, apiKey, onProgress, modelSelection }) {
   onProgress?.({ stage: 'GENERATING FOLLOW-UP', detail: `Generating optional follow-up for ${chit.target}...`, done: 0, total: 1 });
-  const prompt = `Return STRICT JSON only, no markdown fences. Generate an optional follow-up for this MUN POI.\nAGENDA: ${form.agenda}\nPORTFOLIO: ${form.portfolio}\nSLIDERS: ${JSON.stringify(sliders)}\nEXISTING CHIT: ${JSON.stringify(chit)}\nReturn {"expectedEvasion":"...","question":"..."}. The follow-up must be short, direct, evidence-based, and must return to the original pressure point. Do not introduce unrelated issues, ceremonial openings, or new unsupported sources.`;
+  const prompt = `${form.naturalLanguage ? naturalLanguageInstruction() : ''}\nReturn STRICT JSON only, no markdown fences. Generate an optional follow-up for this MUN POI.\nAGENDA: ${form.agenda}\nPORTFOLIO: ${form.portfolio}\nSLIDERS: ${JSON.stringify(sliders)}\nEXISTING CHIT: ${JSON.stringify(chit)}\nReturn {"expectedEvasion":"...","question":"..."}. The follow-up must be short, direct, evidence-based, and must return to the original pressure point. Do not introduce unrelated issues, ceremonial openings, or new unsupported sources.`;
   const response = await callGemini(apiKey, prompt, { ...modelSelection, schema: FOLLOW_UP_RESPONSE_SCHEMA });
   const text = response.text;
   try {
@@ -140,7 +151,7 @@ export function lengthInfo(length) { return band(length, [[10, { lines: '≈ 1 l
 function aggressionInstruction(value) { return band(value, [[10, 'Use a calm, neutral question with minimal confrontation.'], [30, 'Use a mild challenge that asks for a clear policy explanation.'], [50, 'Use a firm challenge and clearly expose the relevant disagreement.'], [70, 'Use strong direct wording and pressure; ask how the delegation can justify the contradiction.'], [85, 'Use very aggressive but MUN-usable wording. Lead into the contradiction and give little room for vague answers.'], [100, 'Use maximum directness. Lead with the strongest verified contradiction, remove unnecessary diplomatic cushioning, end with a direct challenge, and do not soften the wording. Do not use insults or unsupported accusations.']]); }
 function controversyInstruction(value) { return band(value, [[10, 'Use a normal policy disagreement only.'], [30, 'Use a minor documented inconsistency if available.'], [50, 'Use a clear policy contradiction tied to the agenda.'], [70, 'Use a serious documented contradiction, commitment gap, vote, dispute, or implementation failure.'], [85, 'Prioritize major verified controversies, commitment failures, policy-practice gaps, legal disputes, or financial inconsistencies.'], [100, 'Search for the strongest relevant VERIFIED pressure point available: broken commitments, conflicting statements, voting contradictions, legal disputes, implementation failures, or financial inconsistencies. Never manufacture or exaggerate controversy.']]); }
 function diplomacyInstruction(value) { return band(value, [[10, 'Use blunt, direct wording. Do not add diplomatic cushioning.'], [30, 'Use very direct MUN wording with minimal restraint.'], [50, 'Use normal MUN language with moderate diplomatic restraint.'], [70, 'Use formal language while preserving pressure.'], [85, 'Use highly diplomatic polish without weakening the challenge.'], [100, 'Use maximum diplomatic polish, but preserve the same substantive pressure and direct question. High diplomacy does not reduce pressure.']]); }
-export function buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes = ['AUTO'], researchPacket = null }) {
+export function buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes = ['AUTO'], researchPacket = null, batchNumber = 1, totalBatches = 1, previousPoiMetadata = [] }) {
   const manualTargets = selectedTargets.map((c) => `${c.name} (${c.iso})`).join(', ') || 'NONE — target countries are optional; identify useful targets globally if target mode allows.';
   const info = lengthInfo(sliders.length);
   return `COMMITTEE:
@@ -160,6 +171,9 @@ ${targetingMode === 'selected_only' ? 'SELECTED TARGETS ONLY' : 'SELECTED + GLOB
 
 NUMBER OF POIs:
 ${poiCount}
+
+GENERATION BATCH:
+${batchNumber} of ${totalBatches}
 
 AGGRESSION:
 ${sliders.aggression}/100
@@ -202,6 +216,9 @@ ${researchPacket ? JSON.stringify(researchPacket).slice(0, 45000) : 'DDGS unavai
 
 POI TYPE:
 ${poiTypes.join(', ')}
+
+PREVIOUS POI METADATA TO AVOID REPETITION:
+${previousPoiMetadata.length ? JSON.stringify(previousPoiMetadata).slice(0, 18000) : 'NONE'}
 
 You are an expert competitive Model United Nations strategist.
 
@@ -254,6 +271,8 @@ Distinguish legally binding obligations from non-binding political commitments.
 
 Use simple but precise English.
 
+${form.naturalLanguage ? naturalLanguageInstruction() : ''}
+
 Do not write an academic essay.
 
 Do not use ceremonial openings.
@@ -278,7 +297,7 @@ Use authoritative legal sources where relevant: UN Charter, UNSC resolutions, UN
 
 Use reputable external sources for documented controversies: Reuters, AP, Financial Times, Bloomberg, BBC, Al Jazeera, major established newspapers, credible investigative organizations, academic publications, and established research institutions. Avoid random blogs, unsourced sites, anonymous claims, social media as primary evidence, AI-generated sources, and Wikipedia as primary evidence.
 
-Generate exactly ${poiCount} distinct POIs. No duplicates. Each POI should preferably attack a different contradiction, commitment, legal issue, evidence point, implementation failure, policy issue, or financial issue.
+Generate exactly ${poiCount} distinct POIs for this batch. No duplicates within this batch or against PREVIOUS POI METADATA. Each POI should preferably attack a different contradiction, commitment, legal issue, evidence point, implementation failure, policy issue, or financial issue.
 
 Important concepts may be emphasized with Markdown-style bold markers around short phrases only.
 
@@ -298,19 +317,49 @@ Required JSON shape:
 {"pois":[{"target":"","question":"","legalFoundation":"","evidence":[{"sourceName":"","organization":"","publicationDate":"","url":"","claimSupported":"","sourceType":"PRIMARY","confidence":0}],"documentedIssue":"","classification":"","classificationReason":"","tacticalImpact":"","followUp":null}]}`;
 }
 
-async function generateMissingPois({ form, sliders, selectedTargets, targetingMode, includeFollowUp, mission, missing, poiCount, poiTypes = ['AUTO'], modelSelection }) {
-  const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount: missing, poiTypes }) + `\n\nAlready generated POIs to avoid duplicating: ${JSON.stringify(mission.chits.map((chit) => chit.poi))}. Generate exactly ${missing} additional distinct replacement POI chits only.`;
+async function generateMissingPois({ form, sliders, selectedTargets, targetingMode, includeFollowUp, mission, missing, poiCount, poiTypes = ['AUTO'], modelSelection, researchPacket }) {
+  const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount: missing, poiTypes, researchPacket, previousPoiMetadata: compactPoiMetadata(mission.chits) }) + `\n\nAlready generated POIs to avoid duplicating: ${JSON.stringify(mission.chits.map((chit) => chit.poi))}. Generate exactly ${missing} additional distinct replacement POI chits only.`;
   const response = await callGemini(form.apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA });
   const text = response.text;
   const extra = await recoverMission({ apiKey: form.apiKey, text, ctx: { form, sliders, includeFollowUp, poiCount: missing, targetingMode, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
   return { ...mission, chits: [...mission.chits, ...extra.chits].slice(0, poiCount), recommendedTargets: [...(mission.recommendedTargets || []), ...(extra.recommendedTargets || [])] };
 }
 
-async function replaceDuplicatePois({ form, sliders, includeFollowUp, mission, duplicates, poiCount, modelSelection }) {
+async function replaceDuplicatePois({ form, sliders, includeFollowUp, mission, duplicates, poiCount, modelSelection, researchPacket }) {
   const keep = mission.chits.filter((_, index) => !duplicates.includes(index));
-  const prompt = `Return STRICT JSON only, no markdown fences. Generate exactly ${duplicates.length} distinct replacement POI chits. Do not duplicate these POIs: ${JSON.stringify(keep.map((chit) => chit.poi))}. Agenda: ${form.agenda}. Portfolio: ${form.portfolio}. Sliders: ${JSON.stringify(sliders)}. Follow-up: ${includeFollowUp ? 'GENERATE' : 'DO NOT GENERATE'}. Use the same ChitForge schema with targets[].pressure_points[].`;
+  const prompt = `${form.naturalLanguage ? naturalLanguageInstruction() : ''}\nReturn STRICT JSON only, no markdown fences. Generate exactly ${duplicates.length} distinct replacement POI chits. Do not duplicate these POIs: ${JSON.stringify(keep.map((chit) => chit.poi))}. Agenda: ${form.agenda}. Portfolio: ${form.portfolio}. Sliders: ${JSON.stringify(sliders)}. Follow-up: ${includeFollowUp ? 'GENERATE' : 'DO NOT GENERATE'}. Use the same ChitForge schema with targets[].pressure_points[]. Research packet: ${JSON.stringify(researchPacket || {}).slice(0, 12000)}.`;
   const response = await callGemini(form.apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA });
   const text = response.text;
   const replacement = await recoverMission({ apiKey: form.apiKey, text, ctx: { form, sliders, includeFollowUp, poiCount: duplicates.length, targetingMode: 'replacement', lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
   return { ...mission, chits: [...keep, ...replacement.chits].slice(0, poiCount) };
+}
+
+export function planGenerationBatches(poiCount) {
+  const count = Number(poiCount);
+  if (!Number.isInteger(count) || count < 1 || count > MAX_POIS) throw new GeminiError('Choose a POI count from 1 to 250.', { category: 'invalid-poi-count' });
+  const batches = [];
+  let remaining = count;
+  while (remaining > 0) { const next = Math.min(GENERATION_BATCH_SIZE, remaining); batches.push(next); remaining -= next; }
+  return batches;
+}
+function naturalLanguageInstruction() { return `NATURAL LANGUAGE MODE: Write each POI like a real MUN delegate would naturally say it. Use simple, direct human English. Avoid AI-assistant, legal-memo, academic-paper, consulting-report, press-release, or template-like phrasing. Avoid filler, robotic repetition, unnecessary formalism, repeated openings, and excessive legal terminology. Prefer concise spoken simple MUN language which anyone can understand, varied sentence structures, specific references to the researched issue, and direct tactical questions. Do not make the language childish, sloppy, slang-heavy, or grammatically incorrect. Natural language must NEVER override factual accuracy, legal/policy accuracy, tactical usefulness, or requested length.`; }
+function compactPoiMetadata(chits = []) { return chits.map((chit) => ({ target: chit.target, type: chit.classification || chit.pressureProfile?.classification, factualClaim: chit.documentedIssue || chit.pressurePoint?.conflict, source: (chit.evidence || [])[0]?.url || (chit.evidence || [])[0]?.sourceName || '', tacticalAngle: chit.tacticalImpact, questionPattern: String(chit.poi || '').replace(/\*\*/g, '').split(/\s+/).slice(0, 14).join(' ') })); }
+async function generateBatchedMission({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes, researchPacket, batchSizes, modelSelection, onProgress }) {
+  let combined = null; let responseInfo = null; const previous = [];
+  for (let i = 0; i < batchSizes.length; i += 1) {
+    const batchCount = batchSizes[i];
+    onProgress?.({ stage: 'GENERATING POIs', detail: `Generating batch ${i + 1}/${batchSizes.length} (${batchCount} POIs).`, done: previous.length, total: poiCount });
+    const batchPrompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount: batchCount, poiTypes, researchPacket, batchNumber: i + 1, totalBatches: batchSizes.length, previousPoiMetadata: compactPoiMetadata(previous) });
+    const response = await callGemini(form.apiKey, batchPrompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA, attachments: i === 0 && form.backgroundGuide?.data ? [form.backgroundGuide] : [], onModelStatus: (status) => onProgress?.({ stage: 'GENERATING POIs', detail: `Using ${status.model.displayName} for batch ${i + 1}.`, done: previous.length, total: poiCount }) });
+    responseInfo = response;
+    const batchMission = await recoverMission({ apiKey: form.apiKey, text: response.text, ctx: { form, sliders, includeFollowUp, poiCount: batchCount, targetingMode, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
+    const deduped = batchMission.chits.filter((chit) => !findDuplicatePoiIndexes([...previous, chit]).includes(previous.length));
+    previous.push(...deduped);
+    combined = combined || { ...batchMission, chits: [], targets: [], recommendedTargets: [] };
+    combined.portfolioProfile = combined.portfolioProfile || batchMission.portfolioProfile;
+    combined.recommendedTargets = [...(combined.recommendedTargets || []), ...(batchMission.recommendedTargets || [])];
+  }
+  combined.chits = previous.slice(0, poiCount);
+  const groups = new Map(); combined.chits.forEach((poi) => { if (!groups.has(poi.target)) groups.set(poi.target, { country: poi.target, reasonForTargeting: poi.reasonForTargeting, pois: [] }); groups.get(poi.target).pois.push(poi); });
+  combined.targets = [...groups.values()]; combined._response = responseInfo; return combined;
 }

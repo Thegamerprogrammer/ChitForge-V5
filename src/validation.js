@@ -16,7 +16,7 @@ export function validateMissionInputs({ agenda, portfolio, apiKey, poiCount }) {
   if (!agenda.trim()) return 'Enter an agenda/topic.';
   if (!portfolio.trim()) return 'Enter your portfolio/country.';
   if (!apiKey.trim()) return 'Missing Gemini API key. Enter your key and try again.';
-  if (!Number.isInteger(poiCount) || poiCount < 1 || poiCount > 20) return 'Choose a POI count from 1 to 20.';
+  if (!Number.isInteger(poiCount) || poiCount < 1 || poiCount > 250) return 'Choose a POI count from 1 to 250.';
   return '';
 }
 
@@ -134,7 +134,10 @@ export function findDuplicatePoiIndexes(chits) {
   const duplicates = new Set();
   for (let i = 0; i < chits.length; i += 1) {
     for (let j = i + 1; j < chits.length; j += 1) {
-      if (normalizePoiText(chits[i].poi) === normalizePoiText(chits[j].poi) || similarity(chits[i].poi, chits[j].poi) > 0.82) duplicates.add(j);
+      const sameClaim = normalizePoiText(chits[i].documentedIssue || chits[i].pressurePoint?.conflict) && normalizePoiText(chits[i].documentedIssue || chits[i].pressurePoint?.conflict) === normalizePoiText(chits[j].documentedIssue || chits[j].pressurePoint?.conflict);
+      const sourceClaim = (chits[i].evidence || []).some((a) => (chits[j].evidence || []).some((b) => a.url && a.url === b.url && normalizePoiText(a.claimSupported || a.claim) === normalizePoiText(b.claimSupported || b.claim)));
+      const targetAngle = normalizePoiText(chits[i].target) === normalizePoiText(chits[j].target) && similarity(chits[i].tacticalImpact || '', chits[j].tacticalImpact || '') > 0.75;
+      if (normalizePoiText(chits[i].poi) === normalizePoiText(chits[j].poi) || similarity(chits[i].poi, chits[j].poi) > 0.82 || sameClaim || sourceClaim || targetAngle) duplicates.add(j);
     }
   }
   return [...duplicates];
