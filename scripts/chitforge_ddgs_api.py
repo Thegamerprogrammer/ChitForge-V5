@@ -21,6 +21,14 @@ from ddgs.engines.duckduckgo_news import DuckduckgoNews
 from ddgs.results import NewsResult, TextResult
 from ddgs.utils import _extract_vqd
 
+CHITFORGE_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+CHITFORGE_BROWSER_HEADERS = {
+    "User-Agent": CHITFORGE_USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json,text/plain,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://duckduckgo.com/",
+}
+
 
 def _decode_duckduckgo_redirect(href: str) -> str:
     if href.startswith("//"):
@@ -35,10 +43,10 @@ def _lite_search(self, query, region="us-en", safesearch="moderate", timelimit=N
     payload = {"q": query}
     if page > 1:
         payload["s"] = f"{10 + (page - 2) * 15}"
-    resp = self.http_client.request("GET", "https://lite.duckduckgo.com/lite/", params=payload)
+    resp = self.http_client.request("GET", "https://lite.duckduckgo.com/lite/", params=payload, headers=CHITFORGE_BROWSER_HEADERS)
     html_text = resp.text if resp.status_code == 200 else ""
     if not html_text or "anomaly" in html_text.lower():
-        resp = self.http_client.request("GET", "https://html.duckduckgo.com/html/", params={"q": query, "b": "", "l": region})
+        resp = self.http_client.request("GET", "https://html.duckduckgo.com/html/", params={"q": query, "b": "", "l": region}, headers=CHITFORGE_BROWSER_HEADERS)
         html_text = resp.text if resp.status_code == 200 else ""
     if not html_text or "anomaly" in html_text.lower():
         return None
@@ -64,8 +72,7 @@ def _lite_search(self, query, region="us-en", safesearch="moderate", timelimit=N
 
 def _duckduckgo_news_search(self, query, region="us-en", safesearch="moderate", timelimit=None, page=1, **kwargs):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
-        "Referer": "https://duckduckgo.com/",
+        **CHITFORGE_BROWSER_HEADERS,
         "Accept": "application/json, text/javascript, */*; q=0.01",
     }
     with httpx.Client(headers=headers, timeout=self.http_client.client.timeout if hasattr(self.http_client.client, "timeout") else 10, follow_redirects=False) as client:

@@ -40,6 +40,7 @@ function App() {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const generationInFlightRef = useRef(false);
   const [modelMode, setModelMode] = useState(MODEL_SELECTION_MODES.BEST);
   const [manualModelId, setManualModelId] = useState('');
   const [modelCatalog, setModelCatalog] = useState(null);
@@ -98,9 +99,11 @@ function App() {
   };
 
   const runGeneration = async () => {
+    if (generationInFlightRef.current) return;
+    generationInFlightRef.current = true;
     const validation = validateMissionInputs({ ...form, poiCount });
     setError(validation ? { message: validation } : null);
-    if (validation) return;
+    if (validation) { generationInFlightRef.current = false; return; }
     setBusy(true);
     setChits([]);
     setRecommendations([]);
@@ -117,6 +120,7 @@ function App() {
     } catch (err) {
       showError(err);
     } finally {
+      generationInFlightRef.current = false;
       setBusy(false);
       setStatus(null);
     }
