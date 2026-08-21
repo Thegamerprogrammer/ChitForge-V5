@@ -10,7 +10,7 @@ const GENERATION_BATCH_SIZE = 25;
 export async function generateMission({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes = ['AUTO'], onProgress, modelSelection }) {
   onProgress?.({ stage: 'INITIALIZING', detail: 'Initializing ChitForge synthesis engine.', done: 0, total: poiCount });
   onProgress?.({ stage: 'READING AGENDA', detail: 'Reading committee, agenda and portfolio inputs.', done: 0, total: poiCount });
-  onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: 'Starting official DDGS API URL discovery.', done: 0, total: 60 });
+  onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: 'Starting official DDGS API URL discovery.', done: 0, total: poiCount });
   const researchPacket = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount, onProgress });
   const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes, researchPacket });
   onProgress?.({ stage: 'ANALYZING PORTFOLIO', detail: 'Analyzing portfolio foreign-policy interests.', done: 0, total: poiCount });
@@ -372,8 +372,8 @@ export async function recoverShortfall({ form, sliders, selectedTargets, targeti
     onProgress?.({ stage: 'RECOVERING GENERATION', detail: `${current.chits.length} / ${poiCount} valid POIs — recovering ${remaining} rejected or missing candidate(s).`, done: current.chits.length, total: poiCount });
     if (level >= 2 && (analysis.evidenceFailures || analysis.duplicateCount || level >= 3)) {
       onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: 'Expanding evidence coverage for missing tactical angles.', done: current.chits.length, total: poiCount });
-      const expansion = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount: remaining, recoveryFocus: recoveryFocus(level, analysis), onProgress });
-      packet = { ...(packet || {}), sources: [...(packet?.sources || []), ...(expansion.sources || [])], retrievedSources: [...(packet?.retrievedSources || []), ...(expansion.retrievedSources || [])], failures: [...(packet?.failures || []), ...(expansion.failures || [])], recoveryExpansions: [...(packet?.recoveryExpansions || []), expansion.stats] };
+      const expansion = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount, researchState: packet?.researchState, onProgress });
+      packet = { ...(packet || {}), ...expansion, sources: expansion.sources || [], retrievedSources: expansion.retrievedSources || [], failures: expansion.failures || [], researchState: expansion.researchState, recoveryExpansions: [...(packet?.recoveryExpansions || []), expansion.stats] };
     }
     const askFor = Math.min(GENERATION_BATCH_SIZE, Math.ceil(remaining * Math.min(1.6, 1.15 + (analysis.duplicateCount + analysis.evidenceFailures + analysis.underProduced) / Math.max(25, poiCount))));
     const beforeCount = current.chits.length;
