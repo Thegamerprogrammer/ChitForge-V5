@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { bangUrl, buildResearchQueries, classifyExtractionFailure, classifySearchFailure, DDGS_LIMITS, DDGS_SCHEDULING, DDGS_TEXT_BACKEND, DDGS_NEWS_BACKEND, discoverResearch, EXTRACTION_STATUS, SEARCH_STATUS, normalizeDdgsQuery, searchWithBackendFallback, extractSource, shouldSearchNews } from './ddgsResearch.js';
+import { bangUrl, buildResearchQueries, classifyExtractionFailure, classifySearchFailure, DDGS_LIMITS, DDGS_SCHEDULING, DDGS_TEXT_BACKEND, DDGS_NEWS_BACKEND, discoverResearch, EXTRACTION_STATUS, SEARCH_STATUS, normalizeDdgsQuery, searchWithBackendFallback, extractSource, shouldSearchNews, planResearchBudget, getResearchSourceBudget, getResearchQueryBudget, getResearchExtractionBudget } from './ddgsResearch.js';
 import { normalizeEvidenceSource, validateSources } from './sourceValidation.js';
 
 assert.equal(classifySearchFailure({ status: 500, body: 'No results found' }), SEARCH_STATUS.TRUE_EMPTY_RESULT);
@@ -19,13 +19,26 @@ assert.equal(classifyExtractionFailure({ error: new Error('TLS DNS failure') }),
 
 assert.equal(DDGS_TEXT_BACKEND, 'auto');
 assert.equal(DDGS_NEWS_BACKEND, 'auto');
-assert.deepEqual(DDGS_LIMITS, { preferredMin: 25, preferredMax: 50, softMax: 60, hardMax: 80 });
+assert.deepEqual(DDGS_LIMITS, { sourceMultiplier: 3, queryMultiplier: 0.7, extractionRatio: 0.4, absoluteSafetyCeiling: 1000 });
 assert.equal(DDGS_SCHEDULING.searchConcurrency, 1);
 assert.equal(DDGS_SCHEDULING.extractConcurrency, 1);
 assert.equal(DDGS_SCHEDULING.searchDelay.textMinMs, 2200);
 assert.equal(DDGS_SCHEDULING.searchDelay.newsMaxMs, 4500);
-assert.equal(DDGS_SCHEDULING.maxExtractedSources, 25);
 assert.equal(DDGS_SCHEDULING.queryMaxChars, 120);
+
+const budgetCounts = [1, 10, 20, 50, 100, 150, 200, 250];
+const budgets = budgetCounts.map((poiCount) => planResearchBudget({ poiCount }));
+for (let i = 1; i < budgets.length; i += 1) {
+  assert(budgets[i].sourceBudget > budgets[i - 1].sourceBudget);
+  assert(budgets[i].queryBudget > budgets[i - 1].queryBudget);
+  assert(budgets[i].extractionBudget > budgets[i - 1].extractionBudget);
+}
+assert.equal(getResearchSourceBudget(20), 60);
+assert.equal(getResearchSourceBudget(100), 300);
+assert.equal(getResearchSourceBudget(250), 750);
+assert.equal(getResearchQueryBudget(100), 70);
+assert.equal(getResearchExtractionBudget(100, 300), 120);
+assert.equal(budgets.at(-1).sourceBudget, 750);
 
 assert.match(bangUrl('example.org', 'treaty compliance'), /duckduckgo\.com/);
 const normalized = normalizeEvidenceSource({ sourceName: 'Example report', url: 'https://www.example.net/report', ddgsQuery: 'Example Agenda report', extractionStatus: EXTRACTION_STATUS.RETRIEVED });
@@ -46,7 +59,7 @@ const form = {
   researchLinks: ['https://example.org/report']
 };
 const sliders = { aggression: 80, controversy: 70, diplomacy: 60, length: 50 };
-const queryPlan = buildResearchQueries({ form, sliders, selectedTargets: [{ iso: 'AAA', name: 'Target Alpha' }, { iso: 'BBB', name: 'Target Beta' }], targetingMode: 'selected_global', poiTypes: ['LEGAL TRAP', 'AUTO'] });
+const queryPlan = buildResearchQueries({ form, sliders, selectedTargets: [{ iso: 'AAA', name: 'Target Alpha' }, { iso: 'BBB', name: 'Target Beta' }], targetingMode: 'selected_global', poiTypes: ['LEGAL TRAP', 'AUTO'], queryBudget: getResearchQueryBudget(100) });
 assert(queryPlan.length > 10);
 assert.equal(queryPlan.length, new Set(queryPlan.map((q) => q.toLowerCase())).size);
 assert(queryPlan.some((q) => /Example Agenda Topic/.test(q)));
@@ -121,10 +134,11 @@ const scalingFetch = async (url, options) => {
 };
 const delays = [];
 const scaled = await discoverResearch({ form, sliders, selectedTargets: [{ iso: 'AAA', name: 'Target Alpha' }, { iso: 'BBB', name: 'Target Beta' }], targetingMode: 'selected_global', poiTypes: ['LEGAL TRAP'], poiCount: 220, fetchImpl: scalingFetch, skipHealthCheck: true, delayFn: (ms, meta) => delays.push({ ms, meta }), rng: () => 0.5 });
-assert.equal(scaled.stats.hardMax, 80);
-assert.equal(scaled.stats.targetUrls, 80);
-assert(scaled.sources.length <= 80);
-assert(scaled.retrievedSources.length <= 25);
+assert.equal(scaled.stats.sourceBudget, 660);
+assert.equal(scaled.stats.targetUrls, 660);
+assert(scaled.sources.length > 80);
+assert(scaled.sources.length <= 660);
+assert(scaled.retrievedSources.length <= scaled.stats.extractionBudget);
 assert.equal(active.maxSearch, 1);
 assert.equal(active.maxExtract, 1);
 for (let i = 0; i < order.length - 1; i += 1) assert(!(order[i] === 'news' && order[i + 1] === 'news'));
@@ -149,12 +163,67 @@ const dedupeFetch = async (url, options) => {
   if (path === '/search/news') return Response.json({ results: [{ date: '2026-01-01T00:00:00+00:00', title: 'Example article', body: 'Example body', url: 'https://news.example/article', source: 'Example News' }, { date: '2026-01-02T00:00:00+00:00', title: 'Future article', body: 'Future body', url: 'https://news.example/future', source: 'Example News' }] });
   return Response.json({ results: [sourceResult(`dedupe-${dedupeId}`, body.query)] });
 };
-const deduped = await discoverResearch({ form: { ...form, freezeDate: '2026-01-01' }, sliders, selectedTargets: [], targetingMode: 'selected_global', poiTypes: [], poiCount: 10, fetchImpl: dedupeFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0 });
+const deduped = await discoverResearch({ form: { ...form, freezeDate: '2026-01-01' }, sliders, selectedTargets: [], targetingMode: 'selected_global', poiTypes: [], poiCount: 50, fetchImpl: dedupeFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0 });
 assert.equal(deduped.sources.filter((s) => s.domain === 'example.com' && /\/a$/.test(new URL(s.url).pathname)).length, 1);
 assert.equal(deduped.sources.filter((s) => s.title === 'Same Content').length, 1);
 assert.equal(deduped.sources.some((s) => /wikipedia\.org/.test(s.url)), false);
 assert(deduped.sources.some((s) => s.sourceType === 'news' && s.publicationDate === '2026-01-01T00:00:00+00:00' && s.source === 'Example News'));
 assert(!deduped.sources.some((s) => /future/.test(s.url)), 'post-freeze news is filtered');
+
+
+let firstRecoveryId = 5000;
+const firstRecoveryFetch = async (url, options) => {
+  const path = new URL(String(url)).pathname;
+  if (path === '/extract') return Response.json({ content: 'first recovery extracted source content' });
+  const body = JSON.parse(options.body);
+  return Response.json({ results: [sourceResult(`first-recovery-${++firstRecoveryId}`, body.query)] });
+};
+const firstRecovery = await discoverResearch({ form, sliders: { ...sliders, controversy: 30 }, selectedTargets: [{ iso: 'AAA', name: 'Target Alpha' }], targetingMode: 'selected_global', poiTypes: ['LEGAL TRAP'], poiCount: 100, fetchImpl: firstRecoveryFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0.5 });
+const partialResearchState = { ...firstRecovery.researchState, searchedQueryKeys: firstRecovery.researchState.searchedQueryKeys.slice(0, 20), exhaustedQueryKeys: firstRecovery.researchState.exhaustedQueryKeys.slice(0, 20), sources: firstRecovery.sources.slice(0, 80) };
+const previousQueryKeys = new Set(partialResearchState.searchedQueryKeys);
+const previousSourceCount = partialResearchState.sources.length;
+const recoveryCalls = [];
+let recoveryId = 10000;
+const recoveryFetch = async (url, options) => {
+  const path = new URL(String(url)).pathname;
+  if (path === '/extract') return Response.json({ content: 'recovery extracted source content' });
+  const body = JSON.parse(options.body);
+  recoveryCalls.push(body.query.toLowerCase());
+  assert(!previousQueryKeys.has(body.query.toLowerCase()), `repeated recovery query ${body.query}`);
+  return Response.json({ results: Array.from({ length: 3 }, () => sourceResult(`recovery-${++recoveryId}`, body.query)) });
+};
+const recovered = await discoverResearch({ form, sliders: { ...sliders, controversy: 30 }, selectedTargets: [{ iso: 'AAA', name: 'Target Alpha' }], targetingMode: 'selected_global', poiTypes: ['LEGAL TRAP'], poiCount: 100, researchState: partialResearchState, fetchImpl: recoveryFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0.5 });
+assert(recoveryCalls.length > 0);
+assert(recovered.sources.length > previousSourceCount);
+assert.equal(recovered.researchState.searchedQueryKeys.length, previousQueryKeys.size + recoveryCalls.length);
+assert.equal(recovered.stats.sourceBudget, firstRecovery.stats.sourceBudget);
+
+
+const cachedSuccess = { url: 'https://cache.example/success?utm_source=x', canonicalUrl: 'https://cache.example/success', title: 'Cached success', extractedText: 'already extracted', extractionStatus: EXTRACTION_STATUS.RETRIEVED, retrievalStatus: EXTRACTION_STATUS.RETRIEVED };
+const cachedFailure = { url: 'https://cache.example/failure#frag', canonicalUrl: 'https://cache.example/failure', title: 'Cached failure', extractedText: '', extractionStatus: EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_TIMEOUT, retrievalStatus: EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_TIMEOUT };
+const newUnprocessed = { url: 'https://cache.example/new?utm_campaign=x', canonicalUrl: 'https://cache.example/new', title: 'New source', extractionStatus: EXTRACTION_STATUS.DISCOVERED, retrievalStatus: EXTRACTION_STATUS.DISCOVERED, query: 'Example Agenda Topic policy', ddgsQuery: 'Example Agenda Topic policy', backend: 'auto', searchBackend: 'auto', bangUrl: bangUrl('cache.example', 'Example Agenda Topic policy') };
+let cacheExtractCalls = 0;
+const cacheFetch = async (url) => {
+  const path = new URL(String(url)).pathname;
+  if (path === '/extract') { cacheExtractCalls += 1; return Response.json({ content: 'newly extracted content' }); }
+  return Response.json({ results: [] });
+};
+const cacheState = { searchedQueryKeys: Array.from({ length: getResearchQueryBudget(10) }, (_, i) => `already searched ${i}`), exhaustedQueryKeys: [], newsQueryKeys: [], sources: [cachedSuccess, cachedFailure, newUnprocessed], extractionCache: [{ canonicalUrl: cachedSuccess.canonicalUrl, source: cachedSuccess }, { canonicalUrl: cachedFailure.canonicalUrl, source: cachedFailure }], researchBudgetConsumed: { extractionCalls: 2 } };
+const cacheRound = await discoverResearch({ form, sliders: { ...sliders, controversy: 30 }, selectedTargets: [], targetingMode: 'selected_global', poiTypes: [], poiCount: 10, researchState: cacheState, fetchImpl: cacheFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0 });
+assert.equal(cacheExtractCalls, 1, 'only the genuinely new canonical URL is extracted');
+assert.equal(cacheRound.stats.extractionReused, 2, 'successful and failed terminal extraction results are reused');
+assert(cacheRound.researchState.extractionCache.length >= 3, 'new extraction result is cached');
+cacheExtractCalls = 0;
+const cacheRecovery = await discoverResearch({ form, sliders: { ...sliders, controversy: 30 }, selectedTargets: [], targetingMode: 'selected_global', poiTypes: [], poiCount: 10, researchState: cacheRound.researchState, fetchImpl: cacheFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0 });
+assert.equal(cacheExtractCalls, 0, 'recovery does not re-extract successful or terminal failed URLs');
+assert(cacheRecovery.retrievedSources.some((source) => source.extractedText === 'newly extracted content'));
+
+let budgetExtractCalls = 0;
+const budgetSources = Array.from({ length: 10 }, (_, i) => ({ url: `https://budget.example/source-${i}`, canonicalUrl: `https://budget.example/source-${i}`, title: `Budget ${i}`, extractionStatus: EXTRACTION_STATUS.DISCOVERED, retrievalStatus: EXTRACTION_STATUS.DISCOVERED }));
+const budgetFetch = async (url) => { if (new URL(String(url)).pathname === '/extract') { budgetExtractCalls += 1; return Response.json({ content: `budget extracted ${budgetExtractCalls}` }); } return Response.json({ results: [] }); };
+const budgetRound = await discoverResearch({ form, sliders: { ...sliders, controversy: 30 }, selectedTargets: [], targetingMode: 'selected_global', poiTypes: [], poiCount: 2, researchState: { searchedQueryKeys: Array.from({ length: getResearchQueryBudget(2) }, (_, i) => `budget searched ${i}`), sources: budgetSources, researchBudgetConsumed: { extractionCalls: 0 } }, fetchImpl: budgetFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0 });
+assert.equal(budgetExtractCalls, getResearchExtractionBudget(2, getResearchSourceBudget(2)), 'extraction budget is enforced as a run ceiling');
+assert(budgetRound.stats.extractionSkippedBudget > 0);
 
 const researchSource = fs.readFileSync(new URL('./ddgsResearch.js', import.meta.url), 'utf8');
 assert(!/Promise\.all|Promise\.allSettled|worker pool|parallel batch/i.test(researchSource));

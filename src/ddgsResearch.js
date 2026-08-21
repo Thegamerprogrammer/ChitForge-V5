@@ -4,11 +4,11 @@ const DDGS_SEARCH_DELAY = { textMinMs: 2200, textMaxMs: 3800, newsMinMs: 2500, n
 const DDGS_RETRY_DELAYS = [8000, 16000, 32000, 64000];
 const DDGS_BATCH_SIZES = [10, 10, 8, 8, 6, 6, 5, 5, 4, 4];
 
-export const DDGS_LIMITS = { preferredMin: 25, preferredMax: 50, softMax: 60, hardMax: 80 };
+export const DDGS_LIMITS = { sourceMultiplier: 3, queryMultiplier: 0.7, extractionRatio: 0.4, absoluteSafetyCeiling: 1000 };
 export const DDGS_NEWS_BACKEND = 'auto';
 export const DDGS_TEXT_BACKEND = 'auto';
 export const DDGS_BACKENDS = [DDGS_TEXT_BACKEND];
-export const DDGS_SCHEDULING = { searchDelay: DDGS_SEARCH_DELAY, retryDelays: DDGS_RETRY_DELAYS, maxSearchRetries: DDGS_RETRY_DELAYS.length, maxExtractedSources: 25, searchConcurrency: 1, extractConcurrency: 1, queryMaxChars: 120, userAgent: DDGS_USER_AGENT };
+export const DDGS_SCHEDULING = { searchDelay: DDGS_SEARCH_DELAY, retryDelays: DDGS_RETRY_DELAYS, maxSearchRetries: DDGS_RETRY_DELAYS.length, searchConcurrency: 1, extractConcurrency: 1, queryMaxChars: 120, userAgent: DDGS_USER_AGENT };
 export const SEARCH_STATUS = { SUCCESS: 'SUCCESS', TRUE_EMPTY_RESULT: 'TRUE_EMPTY_RESULT', NO_RESULTS_FOR_QUERY: 'TRUE_EMPTY_RESULT', RATE_LIMITED: 'RATE_LIMITED', TIMEOUT: 'TIMEOUT', CONNECTION_ERROR: 'CONNECTION_ERROR', DDGS_UPSTREAM_ERROR: 'DDGS_UPSTREAM_FAILURE', SEARCH_FAILED: 'SEARCH_FAILED' };
 export const EXTRACTION_STATUS = { DISCOVERED: 'DISCOVERED_FROM_SEARCH', RETRIEVED: 'RETRIEVED', DISCOVERED_NOT_RETRIEVED: 'DISCOVERED_NOT_RETRIEVED', DISCOVERED_DIRECT_EXTRACTION_BLOCKED: 'DISCOVERED_DIRECT_EXTRACTION_BLOCKED', RATE_LIMITED: 'RATE_LIMITED', DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR: 'DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR', DISCOVERED_NOT_RETRIEVED_TIMEOUT: 'DISCOVERED_NOT_RETRIEVED_TIMEOUT', DISCOVERED_NOT_RETRIEVED_NETWORK: 'DISCOVERED_NOT_RETRIEVED_NETWORK' };
 
@@ -17,10 +17,15 @@ export function domainFromResult(url = '') { try { return new URL(url).hostname.
 export function bangUrl(domain, query) { return domain ? `https://duckduckgo.com/?q=${encodeURIComponent(`!site:${domain} ${query}`)}` : ''; }
 export function randomDelay(minMs, maxMs, rng = Math.random) { return minMs + rng() * (maxMs - minMs); }
 
+export function getResearchSourceBudget(poiCount = 20) { const count = Math.max(1, Math.min(250, Math.ceil(Number(poiCount) || 20))); return Math.ceil(count * DDGS_LIMITS.sourceMultiplier); }
+export function getResearchQueryBudget(poiCount = 20) { const count = Math.max(1, Math.min(250, Math.ceil(Number(poiCount) || 20))); return Math.ceil(count * DDGS_LIMITS.queryMultiplier); }
+export function getResearchExtractionBudget(poiCount = 20, sourceBudget = getResearchSourceBudget(poiCount)) { return Math.ceil(sourceBudget * DDGS_LIMITS.extractionRatio); }
 export function planResearchBudget({ poiCount = 20 } = {}) {
-  const count = Math.max(1, Math.min(250, Number(poiCount) || 20));
-  const targetUrls = count <= 50 ? 25 : count <= 100 ? 40 : count <= 150 ? 50 : count <= 200 ? 60 : 80;
-  return { preferredMin: DDGS_LIMITS.preferredMin, preferredMax: DDGS_LIMITS.preferredMax, softMax: DDGS_LIMITS.softMax, hardMax: DDGS_LIMITS.hardMax, targetUrls: Math.min(DDGS_LIMITS.hardMax, targetUrls), extractMax: DDGS_SCHEDULING.maxExtractedSources, absoluteSafetyCeiling: DDGS_LIMITS.hardMax };
+  const count = Math.max(1, Math.min(250, Math.ceil(Number(poiCount) || 20)));
+  const sourceBudget = getResearchSourceBudget(count);
+  const queryBudget = getResearchQueryBudget(count);
+  const extractionBudget = getResearchExtractionBudget(count, sourceBudget);
+  return { poiCount: count, sourceBudget, queryBudget, extractionBudget, targetUrls: sourceBudget, hardMax: sourceBudget, softMax: Math.ceil(sourceBudget * 0.8), preferredMin: Math.ceil(sourceBudget * 0.35), preferredMax: Math.ceil(sourceBudget * 0.65), absoluteSafetyCeiling: DDGS_LIMITS.absoluteSafetyCeiling };
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -31,8 +36,8 @@ function bodyText(value = '') { return String(value || '').toLowerCase(); }
 
 export function classifySearchFailure({ status = 0, body = '', error } = {}) {
   const text = bodyText(`${body} ${error?.message || error || ''}`);
-  if ([202, 403, 429].includes(status) || /rate.?limit|too many requests|ratelimit|anomaly|challenge/.test(text)) return SEARCH_STATUS.RATE_LIMITED;
   if (/no results found|no result|no_results/.test(text)) return SEARCH_STATUS.TRUE_EMPTY_RESULT;
+  if ([202, 403, 429].includes(status) || /rate.?limit|too many requests|ratelimit|anomaly|challenge/.test(text)) return SEARCH_STATUS.RATE_LIMITED;
   if ([500, 502, 503, 504].includes(status)) return SEARCH_STATUS.DDGS_UPSTREAM_ERROR;
   if (error?.name === 'AbortError' || /timeout|timed out|time out/.test(text)) return SEARCH_STATUS.TIMEOUT;
   if (/econn|connection|network|dns|enotfound|getaddrinfo|tls|ssl|certificate|protocol|reset/.test(text)) return SEARCH_STATUS.CONNECTION_ERROR;
@@ -114,7 +119,7 @@ function buildResearchContext({ form = {}, sliders = {}, selectedTargets = [], t
 }
 function addQuery(queries, parts) { const q = normalizeDdgsQuery(cleanJoin(parts)); if (q) queries.push(q); }
 
-export function buildResearchQueries({ form = {}, sliders = {}, selectedTargets = [], targetingMode, poiTypes = [] }) {
+export function buildResearchQueries({ form = {}, sliders = {}, selectedTargets = [], targetingMode, poiTypes = [], queryBudget = getResearchQueryBudget(20) }) {
   const ctx = buildResearchContext({ form, sliders, selectedTargets, targetingMode, poiTypes });
   const queries = [];
   const agenda = ctx.agenda;
@@ -141,15 +146,18 @@ export function buildResearchQueries({ form = {}, sliders = {}, selectedTargets 
   }
   for (const type of (poiTypes || []).filter((t) => t && t !== 'AUTO').slice(0, 3)) addQuery(queries, [agenda, type.toLowerCase()]);
   for (const domain of ctx.linkContext) addQuery(queries, [agenda, `site:${domain}`]);
-  return [...new Map(queries.map((q) => [q.toLowerCase(), q])).values()].filter((q) => q && q.length <= DDGS_SCHEDULING.queryMaxChars).slice(0, 48);
+  return limitQueries(queries, queryBudget);
 }
+
+function queryKey(query = '') { return normalizeDdgsQuery(query).toLowerCase(); }
+function limitQueries(queries, budget) { return [...new Map(queries.map((q) => [queryKey(q), q])).values()].filter((q) => q && q.length <= DDGS_SCHEDULING.queryMaxChars).slice(0, Math.max(1, budget)); }
 
 function expandResearchQueries({ form, selectedTargets = [], targetingMode, poiTypes = [], round = 0 }) {
   const sliders = { aggression: round >= 2 ? 65 : 35, controversy: round >= 4 ? 65 : 0, diplomacy: round % 2 ? 70 : 30 };
-  const base = buildResearchQueries({ form, sliders, selectedTargets, targetingMode, poiTypes });
+  const base = buildResearchQueries({ form, sliders, selectedTargets, targetingMode, poiTypes, queryBudget: getResearchQueryBudget(250) });
   const extraAngles = ['evidence', 'historical context', 'commitment', 'statement', 'legal framework', 'implementation report'];
   const queries = [...base];
-  for (const angle of extraAngles.slice(round % extraAngles.length, (round % extraAngles.length) + 3)) addQuery(queries, [form.agenda, form.portfolio, angle, `round ${round + 1}`]);
+  for (let i = 0; i < extraAngles.length; i += 1) addQuery(queries, [form.agenda, form.portfolio, extraAngles[(round + i) % extraAngles.length]]);
   return [...new Map(queries.map((q) => [q.toLowerCase(), q])).values()].filter(Boolean);
 }
 
@@ -217,6 +225,31 @@ async function extractOnce(source, { fetchImpl = fetch, baseUrl = DDGS_BASE_URL 
 }
 export async function extractSource(source, options = {}) { return extractOnce(source, options); }
 
+function extractionCacheEntries(cache) {
+  if (!cache) return [];
+  if (Array.isArray(cache)) return cache;
+  if (cache instanceof Map) return [...cache.entries()].map(([canonicalUrlValue, source]) => ({ canonicalUrl: canonicalUrlValue, source }));
+  return Object.entries(cache).map(([canonicalUrlValue, source]) => ({ canonicalUrl: canonicalUrlValue, source }));
+}
+function sourceHasCompletedExtraction(source = {}) {
+  const status = source.extractionStatus || source.retrievalStatus || '';
+  return Boolean(source.extractedText) || (status && status !== EXTRACTION_STATUS.DISCOVERED);
+}
+function buildExtractionCache(researchState = {}) {
+  const cache = new Map();
+  for (const entry of extractionCacheEntries(researchState.extractionCache)) {
+    const source = entry?.source || entry?.value || entry;
+    const key = canonicalUrl(entry?.canonicalUrl || source?.canonicalUrl || source?.url || '');
+    if (key && sourceHasCompletedExtraction(source)) cache.set(key, { ...source, canonicalUrl: key, url: source.url || key });
+  }
+  for (const source of researchState.sources || []) {
+    const key = canonicalUrl(source.canonicalUrl || source.url || '');
+    if (key && sourceHasCompletedExtraction(source) && !cache.has(key)) cache.set(key, { ...source, canonicalUrl: key, url: source.url || key });
+  }
+  return cache;
+}
+function serializeExtractionCache(cache) { return [...cache.entries()].map(([canonicalUrlValue, source]) => ({ canonicalUrl: canonicalUrlValue, source })); }
+
 function sourceFromResult(result, query, backend, endpoint = '/search/text') {
   const url = canonicalUrl(result.href || result.url || result.link);
   const domain = domainFromResult(url);
@@ -229,10 +262,10 @@ function isAfterFreezeDate(dateValue, freezeDate) {
   const freeze = new Date(`${freezeDate}T23:59:59Z`);
   return Number.isFinite(date.getTime()) && Number.isFinite(freeze.getTime()) && date > freeze;
 }
-function retainResults({ results, search, endpoint, byUrl, contentSignatures, stats, freezeDate = '' }) {
+function retainResults({ results, search, endpoint, byUrl, contentSignatures, stats, freezeDate = '', sourceBudget = DDGS_LIMITS.absoluteSafetyCeiling }) {
   let added = 0;
   for (const result of results) {
-    if (byUrl.size >= DDGS_LIMITS.hardMax) break;
+    if (byUrl.size >= sourceBudget) break;
     const source = sourceFromResult(result, search.query, search.backend, endpoint);
     const signature = contentSignature(result);
     if (!source.url || /wikipedia\.org/i.test(source.url) || isAfterFreezeDate(source.publicationDate || source.date, freezeDate)) { stats.filteredUrls += 1; continue; }
@@ -242,36 +275,36 @@ function retainResults({ results, search, endpoint, byUrl, contentSignatures, st
   }
   return added;
 }
-function batchSizeForUrlCount(count) { if (count < 25) return 8; if (count < 50) return 6; if (count < 70) return 4; if (count < 80) return 2; return 0; }
-function shouldStopAfterBatch({ retained, targetUrls, batchYield, staleBatches, queryPoolExhausted, throttleExhausted }) {
-  if (retained >= DDGS_LIMITS.hardMax || throttleExhausted) return true;
-  if (retained < Math.min(DDGS_LIMITS.preferredMin, targetUrls)) return queryPoolExhausted && staleBatches >= 4;
-  if (retained >= targetUrls && staleBatches >= 2) return true;
-  if (retained >= DDGS_LIMITS.preferredMax && batchYield <= 2) return true;
-  if (retained >= DDGS_LIMITS.softMax && batchYield <= 4) return true;
+function batchSizeForUrlCount(count) { if (count < 25) return 8; if (count < 50) return 6; return 4; }
+function shouldStopAfterBatch({ retained, budget, batchYield, staleBatches, queryPoolExhausted, throttleExhausted }) {
+  if (retained >= budget.sourceBudget || throttleExhausted) return true;
+  if (retained < Math.min(budget.preferredMin, budget.targetUrls)) return queryPoolExhausted && staleBatches >= 4;
+  if (retained >= budget.targetUrls && staleBatches >= 2) return true;
+  if (retained >= budget.preferredMax && batchYield <= 2) return true;
+  if (retained >= budget.softMax && batchYield <= 4) return true;
   return queryPoolExhausted && staleBatches >= 5;
 }
 
-export async function discoverResearch({ form, sliders = {}, selectedTargets, targetingMode, poiTypes, poiCount = 20, recoveryFocus = '', onProgress, fetchImpl = fetch, baseUrl = DDGS_BASE_URL, delayFn = defaultDelay, rng = Math.random, skipHealthCheck = false } = {}) {
+export async function discoverResearch({ form, sliders = {}, selectedTargets, targetingMode, poiTypes, poiCount = 20, researchState = null, onProgress, fetchImpl = fetch, baseUrl = DDGS_BASE_URL, delayFn = defaultDelay, rng = Math.random, skipHealthCheck = false } = {}) {
   const health = skipHealthCheck ? { ok: true, status: 200, detail: 'DDGS health check skipped by test harness.' } : await checkDdgsHealth({ fetchImpl, baseUrl });
   const budget = planResearchBudget({ poiCount });
-  const initialQueries = buildResearchQueries({ form, sliders, selectedTargets, targetingMode, poiTypes });
-  if (!health.ok) return { schema: 'DDGS API /search/text + /search/news + /extract (OpenAPI 3.1.0)', health, queries: initialQueries, sources: [], retrievedSources: [], bangUrls: [], automaticTargetCandidates: [], failures: [{ status: 'DDGS_API_UNAVAILABLE', detail: health.detail, category: 'ddgs-research-failure' }], stats: { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, queryCount: initialQueries.length, discoveredUrls: 0, retainedUrls: 0, deduplicatedUrls: 0, textSearches: 0, newsSearches: 0, retrievedSources: 0, extractionFailed: 0, hardMax: budget.hardMax, softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, targetUrls: budget.targetUrls, degraded: true } };
+  const initialQueries = buildResearchQueries({ form, sliders, selectedTargets, targetingMode, poiTypes, queryBudget: budget.queryBudget });
+  if (!health.ok) return { schema: 'DDGS API /search/text + /search/news + /extract (OpenAPI 3.1.0)', health, queries: initialQueries, sources: [], retrievedSources: [], bangUrls: [], automaticTargetCandidates: [], failures: [{ status: 'DDGS_API_UNAVAILABLE', detail: health.detail, category: 'ddgs-research-failure' }], stats: { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, queryCount: initialQueries.length, discoveredUrls: 0, retainedUrls: 0, deduplicatedUrls: 0, textSearches: 0, newsSearches: 0, retrievedSources: 0, extractionFailed: 0, hardMax: budget.hardMax, sourceBudget: budget.sourceBudget, queryBudget: budget.queryBudget, extractionBudget: budget.extractionBudget, extractionCallsRemaining: budget.extractionBudget, softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, targetUrls: budget.targetUrls, degraded: true } };
 
-  const byUrl = new Map(); const contentSignatures = new Set(); const failures = []; const searched = new Set(); const queryQueue = [...initialQueries];
-  const stats = { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, deduplicatedUrls: 0, filteredUrls: 0, textSearches: 0, newsSearches: 0, extractionCompleted: 0, extractionFailed: 0, retryBackoffs: 0, throttleBackoffs: 0 };
+  const byUrl = new Map((researchState?.sources || []).map((source) => [canonicalUrl(source.canonicalUrl || source.url), source]).filter(([url]) => url)); const contentSignatures = new Set(researchState?.contentSignatures || []); for (const source of byUrl.values()) { const sig = contentSignature(source); if (sig) contentSignatures.add(sig); } const failures = [...(researchState?.failedQueries || [])]; const searched = new Set([...(researchState?.searchedQueryKeys || []), ...(researchState?.exhaustedQueryKeys || [])]); const newsSearched = new Set(researchState?.newsQueryKeys || []); const queryQueue = [...initialQueries]; const extractionCache = buildExtractionCache(researchState || {}); const priorExtractionCalls = Number(researchState?.researchBudgetConsumed?.extractionCalls || researchState?.researchBudgetConsumed?.extractions || 0); let extractionCalls = priorExtractionCalls;
+  const stats = { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, deduplicatedUrls: 0, filteredUrls: 0, textSearches: 0, newsSearches: 0, extractionCompleted: 0, extractionFailed: 0, retryBackoffs: 0, throttleBackoffs: 0, extractionReused: 0, extractionSkippedBudget: 0 };
   let expansionRound = 0; let staleBatches = 0; let throttleFailures = 0; let throttleExhausted = false;
 
-  while (byUrl.size < DDGS_LIMITS.hardMax) {
+  while (byUrl.size < budget.sourceBudget && searched.size < budget.queryBudget) {
     const requestedBatchSize = batchSizeForUrlCount(byUrl.size) || DDGS_BATCH_SIZES[Math.min(expansionRound, DDGS_BATCH_SIZES.length - 1)] || 4;
     while (queryQueue.filter((q) => !searched.has(q)).length < requestedBatchSize && expansionRound < 40) {
-      for (const q of expandResearchQueries({ form: { ...form, researchNotes: cleanJoin([form.researchNotes, recoveryFocus]) }, selectedTargets, targetingMode, poiTypes, round: expansionRound })) {
+      for (const q of expandResearchQueries({ form, selectedTargets, targetingMode, poiTypes, round: expansionRound })) {
         if (!queryQueue.includes(q)) queryQueue.push(q); else stats.duplicateQueries += 1;
       }
       expansionRound += 1;
     }
     const batch = [];
-    while (batch.length < requestedBatchSize && queryQueue.length) {
+    while (batch.length < requestedBatchSize && queryQueue.length && searched.size < budget.queryBudget) {
       const query = queryQueue.shift();
       if (!query || searched.has(query)) { stats.duplicateQueries += 1; continue; }
       searched.add(query); batch.push(query);
@@ -279,41 +312,62 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
     if (!batch.length) break;
     const beforeBatch = byUrl.size;
     for (const query of batch) {
-      if (byUrl.size >= DDGS_LIMITS.hardMax || throttleExhausted) break;
-      onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `${byUrl.size}/${DDGS_LIMITS.hardMax} unique sources · ${stats.searchedQueries} queries · ${stats.successfulQueries} successful · ${stats.failedQueries} failed · Text ${stats.textSearches} · News ${stats.newsSearches} · Dedup ${stats.deduplicatedUrls}`, done: byUrl.size, total: DDGS_LIMITS.hardMax });
+      if (byUrl.size >= budget.sourceBudget || throttleExhausted) break;
+      onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `${byUrl.size}/${budget.sourceBudget} unique sources · ${stats.searchedQueries} queries · ${stats.successfulQueries} successful · ${stats.failedQueries} failed · Text ${stats.textSearches} · News ${stats.newsSearches} · Dedup ${stats.deduplicatedUrls}`, done: byUrl.size, total: budget.sourceBudget });
       const textSearch = await searchWithBackendFallback(query, resultCountForQuery(query, sliders, '/search/text'), { fetchImpl, baseUrl, delayFn, rng, endpoint: '/search/text', onAttempt: (attempt) => { if (attempt.attempt > 1) stats.retryBackoffs += 1; if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, recoverable: isTransientSearchStatus(attempt.status), category: 'ddgs-research-failure' }); } });
       stats.searchedQueries += 1; stats.textSearches += 1;
       if (textSearch.results.length) stats.successfulQueries += 1; else stats.failedQueries += 1;
-      retainResults({ results: textSearch.results, search: textSearch, endpoint: '/search/text', byUrl, contentSignatures, stats, freezeDate: form.freezeDate });
+      retainResults({ results: textSearch.results, search: textSearch, endpoint: '/search/text', byUrl, contentSignatures, stats, freezeDate: form.freezeDate, sourceBudget: budget.sourceBudget });
       if (isThrottleStatus(textSearch.status)) { throttleFailures += 1; stats.throttleBackoffs += 1; } else if (textSearch.results.length) throttleFailures = 0;
       if (throttleFailures >= 3) { throttleExhausted = true; break; }
-      if (byUrl.size >= DDGS_LIMITS.hardMax) break;
-      if (shouldSearchNews(query, { form, sliders })) {
+      if (byUrl.size >= budget.sourceBudget) break;
+      if (shouldSearchNews(query, { form, sliders }) && !newsSearched.has(queryKey(query)) && !(researchState?.newsDisabled)) {
+        newsSearched.add(queryKey(query));
         const newsSearch = await searchWithBackendFallback(query, resultCountForQuery(query, sliders, '/search/news'), { fetchImpl, baseUrl, delayFn, rng, endpoint: '/search/news', onAttempt: (attempt) => { if (attempt.attempt > 1) stats.retryBackoffs += 1; if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, recoverable: isTransientSearchStatus(attempt.status), category: 'ddgs-research-failure' }); } });
         stats.searchedQueries += 1; stats.newsSearches += 1;
         if (newsSearch.results.length) stats.successfulQueries += 1; else stats.failedQueries += 1;
-        retainResults({ results: newsSearch.results, search: newsSearch, endpoint: '/search/news', byUrl, contentSignatures, stats, freezeDate: form.freezeDate });
+        retainResults({ results: newsSearch.results, search: newsSearch, endpoint: '/search/news', byUrl, contentSignatures, stats, freezeDate: form.freezeDate, sourceBudget: budget.sourceBudget });
         if (isThrottleStatus(newsSearch.status)) { throttleFailures += 1; stats.throttleBackoffs += 1; } else if (newsSearch.results.length) throttleFailures = 0;
         if (throttleFailures >= 3) { throttleExhausted = true; break; }
       }
     }
     const batchYield = byUrl.size - beforeBatch;
-    staleBatches = batchYield <= (byUrl.size < DDGS_LIMITS.preferredMin ? 2 : 4) ? staleBatches + 1 : 0;
+    staleBatches = batchYield <= (byUrl.size < budget.preferredMin ? 2 : 4) ? staleBatches + 1 : 0;
     const queryPoolExhausted = !queryQueue.some((q) => !searched.has(q)) && expansionRound >= 40;
-    if (shouldStopAfterBatch({ retained: byUrl.size, targetUrls: budget.targetUrls, batchYield, staleBatches, queryPoolExhausted, throttleExhausted })) break;
+    if (shouldStopAfterBatch({ retained: byUrl.size, budget, batchYield, staleBatches, queryPoolExhausted, throttleExhausted })) break;
   }
 
-  const sources = [...byUrl.values()].slice(0, DDGS_LIMITS.hardMax);
+  const sources = [...byUrl.values()].slice(0, budget.sourceBudget);
   const retrieved = [];
-  for (const source of sources.slice(0, Math.min(budget.extractMax, sources.length))) {
+  const extractionCeiling = budget.extractionBudget;
+  const remainingExtractionCalls = Math.max(0, extractionCeiling - extractionCalls);
+  const extractionCandidates = [];
+  for (const source of sources) {
+    const key = canonicalUrl(source.canonicalUrl || source.url);
+    const cached = extractionCache.get(key);
+    if (cached) { stats.extractionReused += 1; continue; }
+    if (sourceHasCompletedExtraction(source)) { extractionCache.set(key, { ...source, canonicalUrl: key }); stats.extractionReused += 1; continue; }
+    extractionCandidates.push({ ...source, canonicalUrl: key });
+  }
+  const selectedForExtraction = extractionCandidates.slice(0, remainingExtractionCalls);
+  stats.extractionSkippedBudget = Math.max(0, extractionCandidates.length - selectedForExtraction.length);
+  if (selectedForExtraction.length) onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Extracting ${selectedForExtraction.length} new source(s); reusing ${stats.extractionReused} cached extraction result(s).`, done: 0, total: extractionCeiling });
+  else if (stats.extractionReused) onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `No new extraction required; reusing ${stats.extractionReused} previously processed source(s).`, done: stats.extractionReused, total: extractionCeiling });
+  for (let i = 0; i < selectedForExtraction.length; i += 1) {
+    const source = selectedForExtraction[i];
+    onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Extracting ${i + 1}/${selectedForExtraction.length} selected source(s).`, done: i + 1, total: selectedForExtraction.length });
     const extracted = await extractSource(source, { fetchImpl, baseUrl });
-    retrieved.push(extracted);
-    if (extracted.extractionStatus === EXTRACTION_STATUS.RETRIEVED) stats.extractionCompleted += 1; else stats.extractionFailed += 1;
+    const key = canonicalUrl(extracted.canonicalUrl || extracted.url || source.url);
+    const cached = { ...extracted, canonicalUrl: key || extracted.canonicalUrl || source.canonicalUrl };
+    if (key) extractionCache.set(key, cached);
+    retrieved.push(cached); extractionCalls += 1;
+    if (cached.extractionStatus === EXTRACTION_STATUS.RETRIEVED) stats.extractionCompleted += 1; else stats.extractionFailed += 1;
     await delayFn(randomDelay(DDGS_SEARCH_DELAY.extractMinMs, DDGS_SEARCH_DELAY.extractMaxMs, rng), { kind: 'extract-pace', url: source.url });
   }
-  const retrievedByUrl = new Map(retrieved.map((source) => [source.url, source]));
-  const merged = sources.map((source) => retrievedByUrl.get(source.url) || source);
+  const retrievedByUrl = new Map([...extractionCache.entries()].map(([url, source]) => [url, source]));
+  const merged = sources.map((source) => retrievedByUrl.get(canonicalUrl(source.canonicalUrl || source.url)) || source);
+  const retrievedCorpus = merged.filter((source) => sourceHasCompletedExtraction(source));
   const automaticTargetCandidates = deriveAutomaticTargetCandidates({ form, sources: merged, selectedTargets });
   const searchedQueries = [...searched];
-  return { schema: 'DDGS API /search/text + /search/news + /extract (OpenAPI 3.1.0)', health, queries: searchedQueries, plannedQueries: [...new Set([...searchedQueries, ...queryQueue])], sources: merged, retrievedSources: retrieved, bangUrls: merged.map((s) => s.bangUrl).filter(Boolean), automaticTargetCandidates, failures, stats: { ...stats, queryCount: searchedQueries.length, discoveredUrls: byUrl.size, retainedUrls: merged.length, retrievedSources: retrieved.filter((s) => s.extractedText).length, bangUrls: merged.filter((s) => s.bangUrl).length, hardMax: budget.hardMax, softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, targetUrls: budget.targetUrls, degraded: throttleExhausted || merged.length < DDGS_LIMITS.preferredMin, throttleExhausted, uniqueUrlsDiscovered: byUrl.size } };
+  return { schema: 'DDGS API /search/text + /search/news + /extract (OpenAPI 3.1.0)', health, queries: searchedQueries, plannedQueries: [...new Set([...searchedQueries, ...queryQueue])], sources: merged, retrievedSources: retrievedCorpus, bangUrls: merged.map((s) => s.bangUrl).filter(Boolean), automaticTargetCandidates, failures, stats: { ...stats, queryCount: searchedQueries.length, discoveredUrls: byUrl.size, retainedUrls: merged.length, retrievedSources: retrievedCorpus.filter((s) => s.extractedText).length, bangUrls: merged.filter((s) => s.bangUrl).length, hardMax: budget.hardMax, sourceBudget: budget.sourceBudget, queryBudget: budget.queryBudget, extractionBudget: budget.extractionBudget, extractionCallsRemaining: Math.max(0, budget.extractionBudget - extractionCalls), softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, targetUrls: budget.targetUrls, degraded: throttleExhausted || merged.length < budget.preferredMin, throttleExhausted, uniqueUrlsDiscovered: byUrl.size, researchBudgetConsumed: { queries: searched.size, sources: byUrl.size, extractions: extractionCalls, extractionCalls } }, researchState: { searchedQueryKeys: [...searched], exhaustedQueryKeys: [...searched], newsQueryKeys: [...newsSearched], canonicalSourceUrls: [...byUrl.keys()], contentSignatures: [...contentSignatures], extractionCache: serializeExtractionCache(extractionCache), failedQueries: failures, throttledNewsState: { disabled: throttleExhausted }, recoveryRound: Number(researchState?.recoveryRound || 0) + (researchState ? 1 : 0), researchBudgetConsumed: { queries: searched.size, sources: byUrl.size, extractions: extractionCalls, extractionCalls }, sources: merged } }; 
 }
