@@ -31,4 +31,8 @@ assert(candidates.some((c) => c.iso === 'CHN'), 'automatic target candidates inc
 assert(!candidates.some((c) => c.name === 'Indonesia' || c.iso === 'IDN'), 'portfolio is excluded as an opposition target');
 const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode: 'selected_global', includeFollowUp: true, poiCount: 2, poiTypes: ['LEGAL TRAP'], researchPacket: { queries, sources, retrievedSources: [], bangUrls: [], automaticTargetCandidates: candidates, stats: {} } });
 for (const expected of ['BACKGROUND GUIDE ATTACHMENT', 'AUXILIARY ONLY', 'DDGS results are research references and discovery starting points, not the boundary', 'Before POI generation, explicitly analyze the portfolio country', 'Perform agenda-specific antiprep/dirt-prep', 'Freeze Date is strict', 'Never generate an opposition POI against the user']) assert(prompt.includes(expected), `prompt contains ${expected}`);
+assert(prompt.includes('Do not use Google Search Grounding, Gemini Search Grounding, or any hidden search tool.'));
+assert(prompt.includes('Do not restrict your research to the supplied DDGS results.'));
+assert(prompt.includes('Never fabricate URLs'));
+assert(!/G20 Common Framework|Paris Club|Addis Ababa Action Agenda/.test(prompt));
 console.log('research planning dry-run passed');
