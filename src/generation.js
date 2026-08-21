@@ -285,7 +285,7 @@ Type definitions: POLICY CONTRADICTION = stated policy conflicts with conduct/po
 
 Target countries are optional. If targets are selected, prioritize them. If no countries are selected, perform global research and identify countries relevant to the agenda, portfolio interests, legal obligations, international commitments, policy contradictions, documented controversies, financial conduct, voting behavior, implementation failures, diplomatic disputes, economic relevance, and committee relevance. If target mode is SELECTED + GLOBAL RESEARCH, selected countries must not prevent broader portfolio-interest analysis.
 
-Use authoritative legal sources where relevant: UN Charter, UNSC resolutions, UNGA resolutions, ICJ judgments, treaties, WTO agreements, IMF/World Bank documents, G20 Common Framework, Paris Club principles, Addis Ababa Action Agenda, official government sources, and official court records. Do NOT call every UNGA resolution legally binding. Use LEGAL VIOLATION only where justified; otherwise use LEGAL CONCERN or POLICY CONTRADICTION.
+Use authoritative legal sources where relevant: UN Charter, UNSC resolutions, UNGA resolutions, ICJ judgments, treaties, WTO agreements, IMF/World Bank documents, official government sources, and official court records. Do NOT call every UNGA resolution legally binding. Use LEGAL VIOLATION only where justified; otherwise use LEGAL CONCERN or POLICY CONTRADICTION.
 
 Use reputable external sources for documented controversies: Reuters, AP, Financial Times, Bloomberg, BBC, Al Jazeera, major established newspapers, credible investigative organizations, academic publications, and established research institutions. Avoid random blogs, unsourced sites, anonymous claims, social media as primary evidence, AI-generated sources, and Wikipedia as primary evidence.
 
@@ -320,7 +320,7 @@ export function planGenerationBatches(poiCount) {
 function naturalLanguageInstruction() { return `NATURAL LANGUAGE MODE: Write each POI like a real MUN delegate would naturally say it. Use simple, direct human English. Avoid AI-assistant, legal-memo, academic-paper, consulting-report, press-release, or template-like phrasing. Avoid filler, robotic repetition, unnecessary formalism, repeated openings, and excessive legal terminology. Prefer concise spoken simple MUN language which anyone can understand, varied sentence structures, specific references to the researched issue, and direct tactical questions. Do not make the language childish, sloppy, slang-heavy, or grammatically incorrect. Natural language must NEVER override factual accuracy, legal/policy accuracy, tactical usefulness, or requested length.`; }
 function compactPoiMetadata(chits = []) { return chits.map((chit) => ({ target: chit.target, type: chit.classification || chit.pressureProfile?.classification, factualClaim: chit.documentedIssue || chit.pressurePoint?.conflict, source: (chit.evidence || [])[0]?.url || (chit.evidence || [])[0]?.sourceName || '', tacticalAngle: chit.tacticalImpact, questionPattern: String(chit.poi || '').replace(/\*\*/g, '').split(/\s+/).slice(0, 14).join(' ') })); }
 async function generateBatchedMission({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes, researchPacket, batchSizes, modelSelection, onProgress }) {
-  let combined = null; let responseInfo = null; const previous = [];
+  let combined = null; let responseInfo = null; const previous = []; const batchDiagnostics = [];
   for (let i = 0; i < batchSizes.length; i += 1) {
     const batchCount = batchSizes[i];
     onProgress?.({ stage: 'GENERATING POIs', detail: `Generating batch ${i + 1}/${batchSizes.length} (${batchCount} POIs).`, done: previous.length, total: poiCount });
@@ -329,12 +329,15 @@ async function generateBatchedMission({ form, sliders, selectedTargets, targetin
     responseInfo = response;
     const batchMission = await recoverMission({ apiKey: form.apiKey, text: response.text, ctx: { form, sliders, includeFollowUp, poiCount: batchCount, targetingMode, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
     const deduped = batchMission.chits.filter((chit) => !findDuplicatePoiIndexes([...previous, chit]).includes(previous.length));
+    const duplicateRejected = batchMission.chits.length - deduped.length;
+    batchDiagnostics.push({ batch: i + 1, requested: batchCount, candidatesFound: batchMission.diagnostics?.candidatesFound || 0, normalizedPois: batchMission.diagnostics?.normalizedPois || batchMission.chits.length, accepted: deduped.length, duplicateRejected, parseSucceeded: batchMission.diagnostics?.parseSucceeded, parseError: batchMission.diagnostics?.parseError || '' });
     previous.push(...deduped);
+    onProgress?.({ stage: 'GENERATING POIs', detail: `Batch ${i + 1}/${batchSizes.length}: ${deduped.length}/${batchCount} accepted (${duplicateRejected} duplicate rejection${duplicateRejected === 1 ? '' : 's'}).`, done: previous.length, total: poiCount });
     combined = combined || { ...batchMission, chits: [], targets: [], recommendedTargets: [] };
     combined.portfolioProfile = combined.portfolioProfile || batchMission.portfolioProfile;
     combined.recommendedTargets = [...(combined.recommendedTargets || []), ...(batchMission.recommendedTargets || [])];
   }
-  combined.chits = previous.slice(0, poiCount);
+  combined.chits = previous.slice(0, poiCount); combined.metadata = { ...(combined.metadata || {}), batchDiagnostics };
   const groups = new Map(); combined.chits.forEach((poi) => { if (!groups.has(poi.target)) groups.set(poi.target, { country: poi.target, reasonForTargeting: poi.reasonForTargeting, pois: [] }); groups.get(poi.target).pois.push(poi); });
   combined.targets = [...groups.values()]; combined._response = responseInfo; return combined;
 }
@@ -388,6 +391,6 @@ export async function recoverShortfall({ form, sliders, selectedTargets, targeti
     } catch (error) { recoveryLog.at(-1).error = error?.message || String(error); }
     if (current.chits.length === beforeCount && level >= 3) recoveryLog.at(-1).diminishingReturns = true;
   }
-  current.metadata = { ...(current.metadata || {}), recoveryResearchRounds, maxRecoveryResearchRounds: MAX_RECOVERY_RESEARCH_ROUNDS, recoveryLog, partialResult: current.chits.length < poiCount, partialResultReason: current.chits.length < poiCount ? `${current.chits.length} of ${poiCount} defensible POIs generated. Additional candidates were not retained because bounded recovery could not establish enough distinct supported POIs.` : '' };
+  current.metadata = { ...(current.metadata || {}), initialGenerationDiagnostics: mission.diagnostics || {}, recoveryResearchRounds, maxRecoveryResearchRounds: MAX_RECOVERY_RESEARCH_ROUNDS, recoveryLog, partialResult: current.chits.length < poiCount, partialResultReason: current.chits.length < poiCount ? `${current.chits.length} of ${poiCount} defensible POIs generated. Additional candidates were not retained because bounded recovery could not establish enough distinct supported POIs.` : '' };
   return current;
 }

@@ -19,26 +19,27 @@ assert.equal(classifyExtractionFailure({ error: new Error('TLS DNS failure') }),
 
 assert.equal(DDGS_TEXT_BACKEND, 'auto');
 assert.equal(DDGS_NEWS_BACKEND, 'auto');
-assert.deepEqual(DDGS_LIMITS, { sourceMultiplier: 3, queryMultiplier: 0.7, extractionRatio: 0.4, absoluteSafetyCeiling: 1000 });
+assert.deepEqual(DDGS_LIMITS, { sourceMultiplier: 6, queryMultiplier: 1.4, extractionMultiplier: 2, primaryPasses: 2, absoluteSafetyCeiling: 5000 });
 assert.equal(DDGS_SCHEDULING.searchConcurrency, 1);
 assert.equal(DDGS_SCHEDULING.extractConcurrency, 1);
 assert.equal(DDGS_SCHEDULING.searchDelay.textMinMs, 2200);
 assert.equal(DDGS_SCHEDULING.searchDelay.newsMaxMs, 4500);
 assert.equal(DDGS_SCHEDULING.queryMaxChars, 120);
 
-const budgetCounts = [1, 10, 20, 50, 100, 150, 200, 250];
+const budgetCounts = [10, 25, 50, 100, 200];
 const budgets = budgetCounts.map((poiCount) => planResearchBudget({ poiCount }));
 for (let i = 1; i < budgets.length; i += 1) {
   assert(budgets[i].sourceBudget > budgets[i - 1].sourceBudget);
   assert(budgets[i].queryBudget > budgets[i - 1].queryBudget);
   assert(budgets[i].extractionBudget > budgets[i - 1].extractionBudget);
 }
-assert.equal(getResearchSourceBudget(20), 60);
-assert.equal(getResearchSourceBudget(100), 300);
-assert.equal(getResearchSourceBudget(250), 750);
-assert.equal(getResearchQueryBudget(100), 70);
-assert.equal(getResearchExtractionBudget(100, 300), 120);
-assert.equal(budgets.at(-1).sourceBudget, 750);
+assert.equal(getResearchSourceBudget(50), 300);
+assert.equal(getResearchExtractionBudget(50), 100);
+assert.equal(planResearchBudget({ poiCount: 50 }).sourceBudget, 600);
+assert.equal(planResearchBudget({ poiCount: 50 }).extractionBudget, 200);
+assert.equal(planResearchBudget({ poiCount: 100 }).sourcesPerPass, 600);
+assert.equal(planResearchBudget({ poiCount: 100 }).extractionsPerPass, 200);
+assert.equal(budgets.at(-1).sourceBudget, 2400);
 
 assert.match(bangUrl('example.org', 'treaty compliance'), /duckduckgo\.com/);
 const normalized = normalizeEvidenceSource({ sourceName: 'Example report', url: 'https://www.example.net/report', ddgsQuery: 'Example Agenda report', extractionStatus: EXTRACTION_STATUS.RETRIEVED });
@@ -134,10 +135,12 @@ const scalingFetch = async (url, options) => {
 };
 const delays = [];
 const scaled = await discoverResearch({ form, sliders, selectedTargets: [{ iso: 'AAA', name: 'Target Alpha' }, { iso: 'BBB', name: 'Target Beta' }], targetingMode: 'selected_global', poiTypes: ['LEGAL TRAP'], poiCount: 220, fetchImpl: scalingFetch, skipHealthCheck: true, delayFn: (ms, meta) => delays.push({ ms, meta }), rng: () => 0.5 });
-assert.equal(scaled.stats.sourceBudget, 660);
-assert.equal(scaled.stats.targetUrls, 660);
+assert.equal(scaled.stats.primaryPasses, 2);
+assert.equal(scaled.stats.passSummaries.length, 2);
+assert.equal(scaled.stats.sourceBudget, 2640);
+assert.equal(scaled.stats.targetUrls, 2640);
 assert(scaled.sources.length > 80);
-assert(scaled.sources.length <= 660);
+assert(scaled.sources.length <= scaled.stats.sourceBudget);
 assert(scaled.retrievedSources.length <= scaled.stats.extractionBudget);
 assert.equal(active.maxSearch, 1);
 assert.equal(active.maxExtract, 1);
@@ -146,6 +149,26 @@ assert(delays.some((d) => d.meta.kind === 'search-pace'));
 assert(delays.some((d) => d.meta.kind === 'extract-pace'));
 assert(scaled.sources.every((s) => s.backend === 'auto'));
 assert(scaled.sources.every((s) => !('relevanceScore' in s) && !('score' in s) && !('ranking' in s)));
+
+const fiftyBudget = planResearchBudget({ poiCount: 50 });
+assert.equal(fiftyBudget.sourcesPerPass, 300);
+assert.equal(fiftyBudget.extractionsPerPass, 100);
+assert.equal(fiftyBudget.primaryPasses, 2);
+
+let duplicateSearches = 0;
+const duplicateFetch = async (url, options) => {
+  const path = new URL(String(url)).pathname;
+  if (path === '/extract') return Response.json({ content: 'duplicate-heavy extracted content' });
+  const body = JSON.parse(options.body);
+  duplicateSearches += 1;
+  return Response.json({ results: [
+    { title: `Dup ${duplicateSearches}`, href: 'https://dup.example/same', body: `same result ${body.query}` },
+    { title: `Dup again ${duplicateSearches}`, href: 'https://dup.example/same?utm_source=x#frag', body: `same result again ${body.query}` },
+  ] });
+};
+const duplicateHeavy = await discoverResearch({ form, sliders: { ...sliders, controversy: 30 }, selectedTargets: [], targetingMode: 'selected_global', poiTypes: [], poiCount: 10, fetchImpl: duplicateFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0 });
+assert(duplicateHeavy.stats.rawResults > duplicateHeavy.sources.length, 'raw duplicate results do not falsely satisfy useful source targets');
+assert(duplicateHeavy.stats.duplicateHeavyExpansions > 0, 'duplicate-heavy results trigger deeper query expansion');
 
 let dedupeId = 0;
 const dedupeFetch = async (url, options) => {
@@ -222,7 +245,7 @@ let budgetExtractCalls = 0;
 const budgetSources = Array.from({ length: 10 }, (_, i) => ({ url: `https://budget.example/source-${i}`, canonicalUrl: `https://budget.example/source-${i}`, title: `Budget ${i}`, extractionStatus: EXTRACTION_STATUS.DISCOVERED, retrievalStatus: EXTRACTION_STATUS.DISCOVERED }));
 const budgetFetch = async (url) => { if (new URL(String(url)).pathname === '/extract') { budgetExtractCalls += 1; return Response.json({ content: `budget extracted ${budgetExtractCalls}` }); } return Response.json({ results: [] }); };
 const budgetRound = await discoverResearch({ form, sliders: { ...sliders, controversy: 30 }, selectedTargets: [], targetingMode: 'selected_global', poiTypes: [], poiCount: 2, researchState: { searchedQueryKeys: Array.from({ length: getResearchQueryBudget(2) }, (_, i) => `budget searched ${i}`), sources: budgetSources, researchBudgetConsumed: { extractionCalls: 0 } }, fetchImpl: budgetFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0 });
-assert.equal(budgetExtractCalls, getResearchExtractionBudget(2, getResearchSourceBudget(2)), 'extraction budget is enforced as a run ceiling');
+assert.equal(budgetExtractCalls, planResearchBudget({ poiCount: 2 }).extractionBudget, 'extraction budget is enforced as a run ceiling');
 assert(budgetRound.stats.extractionSkippedBudget > 0);
 
 const researchSource = fs.readFileSync(new URL('./ddgsResearch.js', import.meta.url), 'utf8');

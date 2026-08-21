@@ -14,4 +14,6 @@ assert(mission.chits.length > 3, 'recovery adds defensible candidates instead of
 mission = { chits: Array.from({ length: 43 }, (_, i) => valid(i + 1)) };
 const partial = mergeRecoveryCandidates(mission, [], 50);
 assert.equal(partial.chits.length, 43, 'partial valid results are preserved');
+const recoveredExact = mergeRecoveryCandidates(partial, Array.from({ length: 10 }, (_, i) => valid(44 + i)), 50);
+assert.equal(recoveredExact.chits.length, 50, 'successful recovery fills exactly the requested POI count without discarding valid POIs');
 console.log('recovery orchestration dry-run passed');
