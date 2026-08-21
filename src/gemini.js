@@ -4,6 +4,10 @@ import { CHITFORGE_RESPONSE_SCHEMA, FOLLOW_UP_RESPONSE_SCHEMA, FACT_CHECK_RESPON
 const API_VERSION = 'v1beta';
 const BASE_URL = 'https://generativelanguage.googleapis.com';
 const cache = new Map();
+const inFlightDiscovery = new Map();
+const APPLICATION_MAX_OUTPUT_TOKENS = 8192;
+const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+const MAX_FALLBACK_MODELS = 2;
 
 export class GeminiError extends Error {
   constructor(message, { category, status, reason, diagnostic, cause, fallbackLog, model, rawText } = {}) {
@@ -34,34 +38,41 @@ export async function discoverGeminiModels(apiKey, { force = false } = {}) {
   if (!apiKey?.trim()) throw new GeminiError('Missing Gemini API key. Enter your key and try again.', { category: 'missing-api-key' });
   const key = cacheKey(apiKey);
   if (!force && cache.has(key)) return cache.get(key);
-  const res = await fetch(listEndpoint(), { headers: { 'x-goog-api-key': apiKey } });
-  if (!res.ok) {
-    const reason = await parseErrorResponse(res); const category = (res.status === 401 || res.status === 403 || /api[_ ]?key|key not valid|API_KEY_INVALID/i.test(reason)) ? 'invalid-api-key' : 'model-discovery';
-    throw new GeminiError(category === 'invalid-api-key' ? 'Your Gemini API key was rejected. Check the key and API access.' : 'Could not retrieve Gemini model availability.', { category, status: res.status, reason, diagnostic: debugDiagnostic({ status: res.status, reason, category }) });
-  }
-  const payload = await res.json();
-  const models = rankModels((payload.models || []).map((m) => classifyDiscoveredModel(m)));
-  const result = { fetchedAt: Date.now(), all: models, compatible: compatibleModels(models) };
-  cache.set(key, result);
-  return result;
+  if (!force && inFlightDiscovery.has(key)) return inFlightDiscovery.get(key);
+  const promise = (async () => {
+    const res = await fetch(listEndpoint(), { headers: { 'x-goog-api-key': apiKey } });
+    if (!res.ok) {
+      const reason = await parseErrorResponse(res); const category = (res.status === 401 || res.status === 403 || /api[_ ]?key|key not valid|API_KEY_INVALID/i.test(reason)) ? 'invalid-api-key' : 'model-discovery';
+      throw new GeminiError(category === 'invalid-api-key' ? 'Your Gemini API key was rejected. Check the key and API access.' : 'Could not retrieve Gemini model availability.', { category, status: res.status, reason, diagnostic: debugDiagnostic({ status: res.status, reason, category }) });
+    }
+    const payload = await res.json();
+    const models = rankModels((payload.models || []).map((m) => classifyDiscoveredModel(m)));
+    const result = { fetchedAt: Date.now(), all: models, compatible: compatibleModels(models) };
+    cache.set(key, result);
+    return result;
+  })();
+  inFlightDiscovery.set(key, promise);
+  try { return await promise; } finally { inFlightDiscovery.delete(key); }
 }
 
 function buildBody(prompt, schema, model, { nativeJson = true, attachments = [] } = {}) {
   const generationConfig = { temperature: 0.25 };
   if (nativeJson) { generationConfig.responseMimeType = 'application/json'; generationConfig.responseSchema = schema; }
-  if (model?.outputTokenLimit) generationConfig.maxOutputTokens = Math.min(8192, Math.max(2048, model.outputTokenLimit));
+  const limit = Number(model?.outputTokenLimit);
+  generationConfig.maxOutputTokens = Number.isFinite(limit) && limit > 0 ? Math.min(APPLICATION_MAX_OUTPUT_TOKENS, limit) : DEFAULT_MAX_OUTPUT_TOKENS;
   const attachmentParts = (attachments || []).filter((file) => file?.data && file?.mimeType).map((file) => ({ inlineData: { mimeType: file.mimeType, data: file.data } }));
   return { contents: [{ role: 'user', parts: [{ text: prompt }, ...attachmentParts] }], generationConfig };
 }
 
-async function rawGenerate(apiKey, model, prompt, schema, { timeoutMs = 70000, nativeJson = true, attachments = [] } = {}) {
-  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs);
+async function rawGenerate(apiKey, model, prompt, schema, { timeoutMs = 70000, nativeJson = true, attachments = [], onGenerationDiagnostic, attemptKind = "generation" } = {}) {
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs); const startedAt = Date.now();
   try {
     const res = await fetch(endpoint(apiKey, model.id), { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }, signal: controller.signal, body: JSON.stringify(buildBody(prompt, schema, model, { nativeJson, attachments })) });
     if (!res.ok) { const reason = await parseErrorResponse(res); const category = (res.status === 401 || res.status === 403 || /api[_ ]?key|key not valid|API_KEY_INVALID/i.test(reason)) ? 'invalid-api-key' : (res.status === 404 || (res.status === 400 && /Interactions API/i.test(reason))) ? 'model-unavailable' : [429, 500, 503].includes(res.status) ? 'transient-model-failure' : `http-${res.status}`; throw new GeminiError(userMessageForStatus(res.status, reason), { category, status: res.status, reason, model: model.displayName }); }
     const data = await res.json();
     if (data.promptFeedback?.blockReason) throw new GeminiError(`Gemini blocked the request for safety reasons: ${data.promptFeedback.blockReason}.`, { category: 'safety-filter', reason: data.promptFeedback.blockReason, model: model.displayName });
     const text = extractGeminiText(data).trim();
+    onGenerationDiagnostic?.({ kind: attemptKind, model: model.displayName, maxOutputTokens: buildBody(prompt, schema, model, { nativeJson, attachments }).generationConfig.maxOutputTokens, promptSize: prompt.length, responseSize: text.length, finishReason: data.candidates?.[0]?.finishReason || '', apiLatencyMs: Date.now() - startedAt, apiStatus: res.status });
     if (!text) throw new GeminiError('Gemini returned an empty response. Try generating again.', { category: 'empty-response', model: model.displayName, diagnostic: import.meta.env.DEV ? `MODEL: ${model.displayName}\nHTTP STATUS: ${res.status}\nRAW RESPONSE LENGTH: ${JSON.stringify(data).length}\nEXTRACTED TEXT LENGTH: 0` : undefined });
     return text;
   } catch (error) { if (error instanceof GeminiError) throw error; if (error.name === 'AbortError') throw new GeminiError('Request timed out.', { category: 'timeout', cause: error, model: model.displayName }); throw new GeminiError('Could not reach Gemini.', { category: 'network', cause: error, model: model.displayName }); } finally { clearTimeout(timer); }
@@ -75,18 +86,19 @@ export function pickModel(models, modelMode, manualModelId) {
   return selectBest(models);
 }
 
-export async function callGemini(apiKey, prompt, { modelMode = MODEL_SELECTION_MODES.BEST, manualModelId, schema = CHITFORGE_RESPONSE_SCHEMA, timeoutMs = 70000, onModelStatus, attachments = [] } = {}) {
-  const discovered = await discoverGeminiModels(apiKey);
+export async function callGemini(apiKey, prompt, { modelMode = MODEL_SELECTION_MODES.BEST, manualModelId, schema = CHITFORGE_RESPONSE_SCHEMA, timeoutMs = 70000, onModelStatus, onGenerationDiagnostic, attemptKind = "generation", attachments = [], discoveredModels = null, selectedModel = null, maxFallbackModels = MAX_FALLBACK_MODELS } = {}) {
+  const discovered = discoveredModels || await discoverGeminiModels(apiKey);
   const ranked = discovered.compatible;
   if (!ranked.length) throw new GeminiError('No Gemini text-generation models were returned for this API key. Refresh models or check Gemini API access.', { category: 'no-generation-models' });
-  const selected = pickModel(ranked, modelMode, manualModelId) || ranked[0];
+  const selected = selectedModel || pickModel(ranked, modelMode, manualModelId) || ranked[0];
   const fallbackLog = [];
-  for (const model of [selected, ...ranked.filter((m) => m.id !== selected.id)]) {
+  const fallbackModels = [selected, ...ranked.filter((m) => m.id !== selected.id)].slice(0, Math.max(1, maxFallbackModels));
+  for (const model of fallbackModels) {
     onModelStatus?.({ model, mode: modelMode, fallbackLog });
     try {
-      try { return { text: await rawGenerate(apiKey, model, prompt, schema, { timeoutMs, nativeJson: true, attachments }), model, mode: modelMode, fallbackLog, usedNativeJson: true }; }
+      try { return { text: await rawGenerate(apiKey, model, prompt, schema, { timeoutMs, nativeJson: true, attachments, onGenerationDiagnostic, attemptKind }), model, mode: modelMode, fallbackLog, usedNativeJson: true }; }
       catch (err) {
-        if (err.category === 'http-400') { fallbackLog.push({ from: model.displayName, reason: 'structured-json-request-failed; retried plain JSON' }); return { text: await rawGenerate(apiKey, model, prompt, schema, { timeoutMs, nativeJson: false, attachments }), model, mode: modelMode, fallbackLog, usedNativeJson: false }; }
+        if (err.category === 'http-400') { fallbackLog.push({ from: model.displayName, reason: 'structured-json-request-failed; retried plain JSON' }); return { text: await rawGenerate(apiKey, model, prompt, schema, { timeoutMs, nativeJson: false, attachments, onGenerationDiagnostic, attemptKind }), model, mode: modelMode, fallbackLog, usedNativeJson: false }; }
         throw err;
       }
     } catch (err) {
@@ -95,7 +107,7 @@ export async function callGemini(apiKey, prompt, { modelMode = MODEL_SELECTION_M
       fallbackLog.push({ from: model.displayName, reason: err.status || err.category });
     }
   }
-  throw new GeminiError('Gemini could not produce a response with any currently available generation model.', { category: 'all-models-failed', fallbackLog });
+  throw new GeminiError('Gemini could not produce a response with the bounded generation fallback policy.', { category: 'all-models-failed', fallbackLog, diagnostic: `fallbackCount=${fallbackLog.length}; maxFallbackModels=${maxFallbackModels}` });
 }
 
 export async function repairJsonWithGemini(apiKey, rawText, { modelSelection, schema = CHITFORGE_RESPONSE_SCHEMA } = {}) {
@@ -103,10 +115,10 @@ export async function repairJsonWithGemini(apiKey, rawText, { modelSelection, sc
   return callGemini(apiKey, prompt, { ...(modelSelection || {}), schema, timeoutMs: 35000 });
 }
 
-export async function callFactCheck(apiKey, prompt, { primaryModelId, modelSelection } = {}) {
-  const discovered = await discoverGeminiModels(apiKey);
+export async function callFactCheck(apiKey, prompt, { primaryModelId, modelSelection, discoveredModels } = {}) {
+  const discovered = discoveredModels || await discoverGeminiModels(apiKey);
   const model = selectFactCheckModel(discovered.compatible, primaryModelId) || pickModel(discovered.compatible, modelSelection?.modelMode, modelSelection?.manualModelId);
-  const response = await callGemini(apiKey, prompt, { modelMode: MODEL_SELECTION_MODES.MANUAL, manualModelId: model?.id, schema: FACT_CHECK_RESPONSE_SCHEMA, timeoutMs: 45000 });
+  const response = await callGemini(apiKey, prompt, { modelMode: MODEL_SELECTION_MODES.MANUAL, manualModelId: model?.id, selectedModel: model, discoveredModels: discovered, schema: FACT_CHECK_RESPONSE_SCHEMA, timeoutMs: 45000, maxFallbackModels: 1, attemptKind: 'fact-check' });
   return response;
 }
 

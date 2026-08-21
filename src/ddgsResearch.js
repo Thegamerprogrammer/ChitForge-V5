@@ -8,7 +8,7 @@ export const DDGS_LIMITS = { sourceMultiplier: 6, queryMultiplier: 1.4, extracti
 export const DDGS_NEWS_BACKEND = 'auto';
 export const DDGS_TEXT_BACKEND = 'auto';
 export const DDGS_BACKENDS = [DDGS_TEXT_BACKEND];
-export const DDGS_SCHEDULING = { searchDelay: DDGS_SEARCH_DELAY, retryDelays: DDGS_RETRY_DELAYS, maxSearchRetries: DDGS_RETRY_DELAYS.length, searchConcurrency: 1, extractConcurrency: 1, queryMaxChars: 120, userAgent: DDGS_USER_AGENT };
+export const DDGS_SCHEDULING = { searchDelay: DDGS_SEARCH_DELAY, retryDelays: DDGS_RETRY_DELAYS, maxSearchRetries: DDGS_RETRY_DELAYS.length, searchConcurrency: 4, extractConcurrency: 4, queryMaxChars: 120, userAgent: DDGS_USER_AGENT };
 export const SEARCH_STATUS = { SUCCESS: 'SUCCESS', TRUE_EMPTY_RESULT: 'TRUE_EMPTY_RESULT', NO_RESULTS_FOR_QUERY: 'TRUE_EMPTY_RESULT', RATE_LIMITED: 'RATE_LIMITED', TIMEOUT: 'TIMEOUT', CONNECTION_ERROR: 'CONNECTION_ERROR', DDGS_UPSTREAM_ERROR: 'DDGS_UPSTREAM_FAILURE', SEARCH_FAILED: 'SEARCH_FAILED' };
 export const EXTRACTION_STATUS = { DISCOVERED: 'DISCOVERED_FROM_SEARCH', RETRIEVED: 'RETRIEVED', DISCOVERED_NOT_RETRIEVED: 'DISCOVERED_NOT_RETRIEVED', DISCOVERED_DIRECT_EXTRACTION_BLOCKED: 'DISCOVERED_DIRECT_EXTRACTION_BLOCKED', RATE_LIMITED: 'RATE_LIMITED', DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR: 'DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR', DISCOVERED_NOT_RETRIEVED_TIMEOUT: 'DISCOVERED_NOT_RETRIEVED_TIMEOUT', DISCOVERED_NOT_RETRIEVED_NETWORK: 'DISCOVERED_NOT_RETRIEVED_NETWORK' };
 
@@ -35,6 +35,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function browserHeaders(extra = {}) { return { 'User-Agent': DDGS_USER_AGENT, Accept: 'application/json, text/plain, */*', 'Accept-Language': 'en-US,en;q=0.9', Referer: 'https://duckduckgo.com/', ...extra }; }
 async function defaultDelay(ms) { await sleep(ms); }
 async function fetchWithTimeout(url, options = {}, timeoutMs = 9000, fetchImpl = fetch) { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs); try { return await fetchImpl(url, { ...options, signal: controller.signal }); } finally { clearTimeout(timer); } }
+async function mapPool(items, concurrency, worker) { const results = new Array(items.length); let next = 0; const workers = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => { while (next < items.length) { const index = next++; results[index] = await worker(items[index], index); } }); await Promise.all(workers); return results; }
 function bodyText(value = '') { return String(value || '').toLowerCase(); }
 
 export function classifySearchFailure({ status = 0, body = '', error } = {}) {
@@ -316,7 +317,8 @@ function retainResults({ results, search, endpoint, byUrl, contentSignatures, st
 }
 function batchSizeForUrlCount(count) { if (count < 25) return 8; if (count < 50) return 6; return 4; }
 function shouldStopAfterBatch({ retained, budget, batchYield, staleBatches, queryPoolExhausted, throttleExhausted }) {
-  if (retained >= budget.sourceBudget || throttleExhausted) return true;
+  if (retained >= budget.sourceBudget) return true;
+  if (throttleExhausted && staleBatches >= 6) return true;
   if (retained < Math.min(budget.preferredMin, budget.targetUrls)) return queryPoolExhausted && staleBatches >= 4;
   if (retained >= budget.targetUrls && staleBatches >= 2) return true;
   if (retained >= budget.preferredMax && batchYield <= 2) return true;
@@ -332,7 +334,7 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
 
   const byUrl = new Map((researchState?.sources || []).map((source) => [canonicalUrl(source.canonicalUrl || source.url), source]).filter(([url]) => url)); const contentSignatures = new Set(researchState?.contentSignatures || []); for (const source of byUrl.values()) { const sig = contentSignature(source); if (sig) contentSignatures.add(sig); } const failures = [...(researchState?.failedQueries || [])]; const searched = new Set([...(researchState?.searchedQueryKeys || []), ...(researchState?.exhaustedQueryKeys || [])]); const newsSearched = new Set(researchState?.newsQueryKeys || []); const queryQueue = [...initialQueries]; const extractionCache = buildExtractionCache(researchState || {}); const priorExtractionCalls = Number(researchState?.researchBudgetConsumed?.extractionCalls || researchState?.researchBudgetConsumed?.extractions || 0); let extractionCalls = priorExtractionCalls;
   const stats = { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, deduplicatedUrls: 0, duplicateUrls: 0, contentDuplicates: 0, filteredUrls: 0, rejectedSources: 0, cachedSources: 0, textSearches: 0, newsSearches: 0, extractionCompleted: 0, extractionFailed: 0, retryBackoffs: 0, throttleBackoffs: 0, extractionReused: 0, extractionSkippedBudget: 0, rawResults: 0, rejectedUrls: 0, duplicateHeavyExpansions: 0 };
-  let expansionRound = 0; let staleBatches = 0; let throttleFailures = 0; let throttleExhausted = false;
+  let expansionRound = 0; let staleBatches = 0; let throttleFailures = 0; let throttleExhausted = false; let adaptiveSearchConcurrency = DDGS_SCHEDULING.searchConcurrency;
 
   const passSummaries = [];
   for (let pass = 1; pass <= budget.primaryPasses; pass += 1) {
@@ -345,16 +347,18 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
       for (const term of discoveredTerms) addQuery(queryQueue, [form.agenda, form.portfolio, term]);
     }
     onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Research pass ${pass}/${budget.primaryPasses}: ${byUrl.size}/${passSourceGoal} unique sources · ${searched.size}/${passQueryGoal} queries.`, done: byUrl.size - passStartSources, total: Math.max(1, passSourceGoal - passStartSources) });
-    while (byUrl.size < passSourceGoal && searched.size < passQueryGoal) {
+    const safetyQueryCeiling = Math.min(budget.absoluteSafetyCeiling, Math.max(passQueryGoal, passSourceGoal * 4));
+    while (byUrl.size < passSourceGoal && searched.size < safetyQueryCeiling) {
       const requestedBatchSize = batchSizeForUrlCount(byUrl.size) || DDGS_BATCH_SIZES[Math.min(expansionRound, DDGS_BATCH_SIZES.length - 1)] || 4;
-      while (queryQueue.filter((q) => !searched.has(queryKey(q))).length < requestedBatchSize && expansionRound < 80) {
+      const expansionSafetyCeiling = Math.max(80, budget.queriesPerPass * budget.primaryPasses * 4);
+      while (queryQueue.filter((q) => !searched.has(queryKey(q))).length < requestedBatchSize && expansionRound < expansionSafetyCeiling) {
         for (const q of expandResearchQueries({ form, selectedTargets, targetingMode, poiTypes, round: expansionRound + (pass === 2 ? 20 : 0) })) {
           if (!queryQueue.some((existing) => queryKey(existing) === queryKey(q)) && !searched.has(queryKey(q))) queryQueue.push(q); else stats.duplicateQueries += 1;
         }
         expansionRound += 1;
       }
       const batch = [];
-      while (batch.length < requestedBatchSize && queryQueue.length && searched.size < passQueryGoal) {
+      while (batch.length < requestedBatchSize && queryQueue.length && searched.size < safetyQueryCeiling) {
         const query = queryQueue.shift();
         const key = queryKey(query);
         if (!query || searched.has(key)) { stats.duplicateQueries += 1; continue; }
@@ -363,35 +367,32 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
       if (!batch.length) break;
       const beforeBatch = byUrl.size;
       const beforeRaw = stats.rawResults;
-      for (const query of batch) {
-        if (byUrl.size >= passSourceGoal || throttleExhausted) break;
+      const searchOutputs = await mapPool(batch, adaptiveSearchConcurrency, async (query) => {
         onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Research pass ${pass}/${budget.primaryPasses}: ${byUrl.size}/${passSourceGoal} useful unique sources · ${stats.searchedQueries} queries · duplicates ${stats.deduplicatedUrls}`, done: byUrl.size - passStartSources, total: Math.max(1, passSourceGoal - passStartSources) });
         const textSearch = await searchWithBackendFallback(query, resultCountForQuery(query, sliders, '/search/text'), { fetchImpl, baseUrl, delayFn, rng, endpoint: '/search/text', onAttempt: (attempt) => { if (attempt.attempt > 1) stats.retryBackoffs += 1; if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, recoverable: isTransientSearchStatus(attempt.status), category: 'ddgs-research-failure' }); } });
+        let newsSearch = null;
+        if (shouldSearchNews(query, { form, sliders }) && !newsSearched.has(queryKey(query)) && !(researchState?.newsDisabled)) {
+          newsSearched.add(queryKey(query));
+          newsSearch = await searchWithBackendFallback(query, resultCountForQuery(query, sliders, '/search/news'), { fetchImpl, baseUrl, delayFn, rng, endpoint: '/search/news', onAttempt: (attempt) => { if (attempt.attempt > 1) stats.retryBackoffs += 1; if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, recoverable: isTransientSearchStatus(attempt.status), category: 'ddgs-research-failure' }); } });
+        }
+        return { query, textSearch, newsSearch };
+      });
+      for (const { textSearch, newsSearch } of searchOutputs) {
         stats.searchedQueries += 1; stats.textSearches += 1; stats.rawResults += textSearch.results.length;
         if (textSearch.results.length) stats.successfulQueries += 1; else stats.failedQueries += 1;
         retainResults({ results: textSearch.results, search: textSearch, endpoint: '/search/text', byUrl, contentSignatures, stats, freezeDate: form.freezeDate, sourceBudget: budget.sourceBudget, form, selectedTargets, poiTypes });
         if (isThrottleStatus(textSearch.status)) { throttleFailures += 1; stats.throttleBackoffs += 1; } else if (textSearch.results.length) throttleFailures = 0;
-        if (throttleFailures >= 3) { throttleExhausted = true; break; }
-        if (byUrl.size >= passSourceGoal) break;
-        if (shouldSearchNews(query, { form, sliders }) && !newsSearched.has(queryKey(query)) && !(researchState?.newsDisabled)) {
-          newsSearched.add(queryKey(query));
-          const newsSearch = await searchWithBackendFallback(query, resultCountForQuery(query, sliders, '/search/news'), { fetchImpl, baseUrl, delayFn, rng, endpoint: '/search/news', onAttempt: (attempt) => { if (attempt.attempt > 1) stats.retryBackoffs += 1; if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, recoverable: isTransientSearchStatus(attempt.status), category: 'ddgs-research-failure' }); } });
-          stats.searchedQueries += 1; stats.newsSearches += 1; stats.rawResults += newsSearch.results.length;
-          if (newsSearch.results.length) stats.successfulQueries += 1; else stats.failedQueries += 1;
-          retainResults({ results: newsSearch.results, search: newsSearch, endpoint: '/search/news', byUrl, contentSignatures, stats, freezeDate: form.freezeDate, sourceBudget: budget.sourceBudget, form, selectedTargets, poiTypes });
-          if (isThrottleStatus(newsSearch.status)) { throttleFailures += 1; stats.throttleBackoffs += 1; } else if (newsSearch.results.length) throttleFailures = 0;
-          if (throttleFailures >= 3) { throttleExhausted = true; break; }
-        }
+        if (newsSearch) { stats.searchedQueries += 1; stats.newsSearches += 1; stats.rawResults += newsSearch.results.length; if (newsSearch.results.length) stats.successfulQueries += 1; else stats.failedQueries += 1; retainResults({ results: newsSearch.results, search: newsSearch, endpoint: '/search/news', byUrl, contentSignatures, stats, freezeDate: form.freezeDate, sourceBudget: budget.sourceBudget, form, selectedTargets, poiTypes }); if (isThrottleStatus(newsSearch.status)) { throttleFailures += 1; stats.throttleBackoffs += 1; } else if (newsSearch.results.length) throttleFailures = 0; }
+        if (throttleFailures >= 3) { throttleExhausted = true; adaptiveSearchConcurrency = Math.max(1, Math.floor(adaptiveSearchConcurrency / 2)); stats.adaptiveThrottleReductions = (stats.adaptiveThrottleReductions || 0) + 1; await delayFn(DDGS_RETRY_DELAYS[Math.min(stats.adaptiveThrottleReductions - 1, DDGS_RETRY_DELAYS.length - 1)], { kind: 'adaptive-throttle-backoff' }); throttleFailures = 0; } else if (textSearch.results.length || newsSearch?.results?.length) { adaptiveSearchConcurrency = Math.min(DDGS_SCHEDULING.searchConcurrency, adaptiveSearchConcurrency + 1); }
       }
       const batchYield = byUrl.size - beforeBatch;
       const duplicateHeavy = stats.rawResults > beforeRaw && batchYield / Math.max(1, stats.rawResults - beforeRaw) < 0.35;
       if (duplicateHeavy) stats.duplicateHeavyExpansions += 1;
       staleBatches = batchYield <= (byUrl.size < budget.preferredMin ? 2 : 4) ? staleBatches + 1 : 0;
-      const queryPoolExhausted = !queryQueue.some((q) => !searched.has(queryKey(q))) && expansionRound >= 80;
+      const queryPoolExhausted = !queryQueue.some((q) => !searched.has(queryKey(q))) && expansionRound >= expansionSafetyCeiling;
       if (shouldStopAfterBatch({ retained: byUrl.size, budget: { ...budget, sourceBudget: passSourceGoal, targetUrls: passSourceGoal }, batchYield, staleBatches, queryPoolExhausted, throttleExhausted })) break;
     }
     passSummaries.push({ pass, sourceTarget: budget.sourcesPerPass, extractionTarget: budget.extractionsPerPass, startSources: passStartSources, endSources: byUrl.size, newSources: byUrl.size - passStartSources, startQueries: passStartQueries, endQueries: searched.size, newQueries: searched.size - passStartQueries, queryKeys: [...searched].slice(passStartQueries), gaps: pass === 1 ? ['pass-2-fill-underrepresented-targets', 'pass-2-expand-source-evidence'] : [] });
-    if (throttleExhausted) break;
   }
 
   const sources = [...byUrl.values()].slice(0, budget.sourceBudget);
@@ -410,16 +411,18 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
   stats.extractionSkippedBudget = Math.max(0, extractionCandidates.length - selectedForExtraction.length);
   if (selectedForExtraction.length) onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Extracting ${selectedForExtraction.length} new source(s); reusing ${stats.extractionReused} cached extraction result(s).`, done: 0, total: extractionCeiling });
   else if (stats.extractionReused) onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `No new extraction required; reusing ${stats.extractionReused} previously processed source(s).`, done: stats.extractionReused, total: extractionCeiling });
-  for (let i = 0; i < selectedForExtraction.length; i += 1) {
-    const source = selectedForExtraction[i];
+  const extractedBatch = await mapPool(selectedForExtraction, DDGS_SCHEDULING.extractConcurrency, async (source, i) => {
     onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Extracting ${i + 1}/${selectedForExtraction.length} selected source(s).`, done: i + 1, total: selectedForExtraction.length });
     const extracted = await extractSource(source, { fetchImpl, baseUrl });
+    await delayFn(randomDelay(DDGS_SEARCH_DELAY.extractMinMs, DDGS_SEARCH_DELAY.extractMaxMs, rng), { kind: 'extract-pace', url: source.url });
+    return { source, extracted };
+  });
+  for (const { source, extracted } of extractedBatch) {
     const key = canonicalUrl(extracted.canonicalUrl || extracted.url || source.url);
     const cached = { ...extracted, canonicalUrl: key || extracted.canonicalUrl || source.canonicalUrl };
     if (key) extractionCache.set(key, cached);
     retrieved.push(cached); extractionCalls += 1;
     if (cached.extractionStatus === EXTRACTION_STATUS.RETRIEVED) stats.extractionCompleted += 1; else stats.extractionFailed += 1;
-    await delayFn(randomDelay(DDGS_SEARCH_DELAY.extractMinMs, DDGS_SEARCH_DELAY.extractMaxMs, rng), { kind: 'extract-pace', url: source.url });
   }
   const retrievedByUrl = new Map([...extractionCache.entries()].map(([url, source]) => [url, source]));
   const merged = sources.map((source) => retrievedByUrl.get(canonicalUrl(source.canonicalUrl || source.url)) || source);

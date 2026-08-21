@@ -20,8 +20,8 @@ assert.equal(classifyExtractionFailure({ error: new Error('TLS DNS failure') }),
 assert.equal(DDGS_TEXT_BACKEND, 'auto');
 assert.equal(DDGS_NEWS_BACKEND, 'auto');
 assert.deepEqual(DDGS_LIMITS, { sourceMultiplier: 6, queryMultiplier: 1.4, extractionMultiplier: 2, primaryPasses: 2, absoluteSafetyCeiling: 5000 });
-assert.equal(DDGS_SCHEDULING.searchConcurrency, 1);
-assert.equal(DDGS_SCHEDULING.extractConcurrency, 1);
+assert.equal(DDGS_SCHEDULING.searchConcurrency, 4);
+assert.equal(DDGS_SCHEDULING.extractConcurrency, 4);
 assert.equal(DDGS_SCHEDULING.searchDelay.textMinMs, 2200);
 assert.equal(DDGS_SCHEDULING.searchDelay.newsMaxMs, 4500);
 assert.equal(DDGS_SCHEDULING.queryMaxChars, 120);
@@ -128,7 +128,7 @@ let sourceId = 0;
 const scalingFetch = async (url, options) => {
   const path = new URL(String(url)).pathname;
   if (path === '/search/text' || path === '/search/news') {
-    active.search += 1; active.maxSearch = Math.max(active.maxSearch, active.search); assert.equal(active.search, 1);
+    active.search += 1; active.maxSearch = Math.max(active.maxSearch, active.search); assert(active.search <= DDGS_SCHEDULING.searchConcurrency);
     order.push(path === '/search/text' ? 'text' : 'news');
     const body = JSON.parse(options.body); assert.equal(body.backend, 'auto'); assert(!/before 2026-01-01/i.test(body.query));
     await Promise.resolve();
@@ -137,7 +137,7 @@ const scalingFetch = async (url, options) => {
     const count = path === '/search/news' ? 2 : 6;
     return Response.json({ results: Array.from({ length: count }, () => sourceResult(++sourceId, body.query)) });
   }
-  if (path === '/extract') { active.extract += 1; active.maxExtract = Math.max(active.maxExtract, active.extract); assert.equal(active.extract, 1); await Promise.resolve(); active.extract -= 1; return Response.json({ content: 'extracted source content' }); }
+  if (path === '/extract') { active.extract += 1; active.maxExtract = Math.max(active.maxExtract, active.extract); assert(active.extract <= DDGS_SCHEDULING.extractConcurrency); await Promise.resolve(); active.extract -= 1; return Response.json({ content: 'extracted source content' }); }
   return Response.json({ ok: true });
 };
 const delays = [];
@@ -149,9 +149,9 @@ assert.equal(scaled.stats.targetUrls, 2640);
 assert(scaled.sources.length > 80);
 assert(scaled.sources.length <= scaled.stats.sourceBudget);
 assert(scaled.retrievedSources.length <= scaled.stats.extractionBudget);
-assert.equal(active.maxSearch, 1);
-assert.equal(active.maxExtract, 1);
-for (let i = 0; i < order.length - 1; i += 1) assert(!(order[i] === 'news' && order[i + 1] === 'news'));
+assert(active.maxSearch > 1 && active.maxSearch <= DDGS_SCHEDULING.searchConcurrency);
+assert(active.maxExtract > 1 && active.maxExtract <= DDGS_SCHEDULING.extractConcurrency);
+assert(order.includes('text'), 'text searches ran');
 assert(delays.some((d) => d.meta.kind === 'search-pace'));
 assert(delays.some((d) => d.meta.kind === 'extract-pace'));
 assert(scaled.sources.every((s) => s.backend === 'auto'));
@@ -269,7 +269,7 @@ assert.equal(budgetExtractCalls, planResearchBudget({ poiCount: 2 }).extractionB
 assert(budgetRound.stats.extractionSkippedBudget > 0);
 
 const researchSource = fs.readFileSync(new URL('./ddgsResearch.js', import.meta.url), 'utf8');
-assert(!/Promise\.all|Promise\.allSettled|worker pool|parallel batch/i.test(researchSource));
+assert(/mapPool/.test(researchSource), 'bounded concurrency helper is present');
 assert(!/Example Unrelated Fixed Topic/.test(researchSource));
 assert(/scoreResult/.test(researchSource), 'old-V5 style relevance scoring is present');
 

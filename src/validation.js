@@ -123,12 +123,16 @@ function normalizePoiText(value) {
 }
 
 function similarity(a, b) {
-  const left = new Set(normalizePoiText(a).split(' ').filter(Boolean));
-  const right = new Set(normalizePoiText(b).split(' ').filter(Boolean));
+  const left = new Set(normalizePoiText(a).split(' ').filter((word) => word.length > 2));
+  const right = new Set(normalizePoiText(b).split(' ').filter((word) => word.length > 2));
   if (!left.size || !right.size) return 0;
   const shared = [...left].filter((word) => right.has(word)).length;
-  return shared / Math.min(left.size, right.size);
+  const union = new Set([...left, ...right]).size;
+  const jaccard = shared / union;
+  const containment = shared / Math.max(left.size, right.size);
+  return Math.max(jaccard, containment * 0.8);
 }
+
 
 export function findDuplicatePoiIndexes(chits) {
   const duplicates = new Set();
@@ -136,9 +140,10 @@ export function findDuplicatePoiIndexes(chits) {
     for (let j = i + 1; j < chits.length; j += 1) {
       const sameClaim = normalizePoiText(chits[i].documentedIssue || chits[i].pressurePoint?.conflict) && normalizePoiText(chits[i].documentedIssue || chits[i].pressurePoint?.conflict) === normalizePoiText(chits[j].documentedIssue || chits[j].pressurePoint?.conflict);
       const sourceClaim = (chits[i].evidence || []).some((a) => (chits[j].evidence || []).some((b) => a.url && a.url === b.url && normalizePoiText(a.claimSupported || a.claim) === normalizePoiText(b.claimSupported || b.claim)));
-      const targetAngle = normalizePoiText(chits[i].target) === normalizePoiText(chits[j].target) && similarity(chits[i].tacticalImpact || '', chits[j].tacticalImpact || '') > 0.75;
       const sameTarget = normalizePoiText(chits[i].target) === normalizePoiText(chits[j].target);
-      const paraphrasedSamePressure = sameTarget && similarity(chits[i].poi, chits[j].poi) > 0.82;
+      const sameIssueFamily = similarity(chits[i].documentedIssue || chits[i].pressurePoint?.conflict || '', chits[j].documentedIssue || chits[j].pressurePoint?.conflict || '') > 0.88;
+      const targetAngle = sameTarget && sameIssueFamily && similarity(chits[i].tacticalImpact || '', chits[j].tacticalImpact || '') > 0.82;
+      const paraphrasedSamePressure = sameTarget && sameIssueFamily && similarity(chits[i].poi, chits[j].poi) > 0.86;
       if (normalizePoiText(chits[i].poi) === normalizePoiText(chits[j].poi) || paraphrasedSamePressure || sameClaim || sourceClaim || targetAngle) duplicates.add(j);
     }
   }

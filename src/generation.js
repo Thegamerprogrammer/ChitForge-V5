@@ -1,4 +1,4 @@
-import { callGemini, callFactCheck, repairJsonWithGemini, GeminiError, CHITFORGE_RESPONSE_SCHEMA, FOLLOW_UP_RESPONSE_SCHEMA } from './gemini.js';
+import { callGemini, callFactCheck, repairJsonWithGemini, discoverGeminiModels, GeminiError, CHITFORGE_RESPONSE_SCHEMA, FOLLOW_UP_RESPONSE_SCHEMA } from './gemini.js';
 import { findDuplicatePoiIndexes, validateMissionResponse } from './validation.js';
 import { toInternalMission, validateInternalMission, extractJson } from './responseParser.js';
 import { applyFactCheckToSources, validateSources } from './sourceValidation.js';
@@ -7,14 +7,71 @@ import { discoverResearch } from './ddgsResearch.js';
 const MAX_POIS = 250;
 const GENERATION_BATCH_SIZE = 25;
 const MAX_RECOVERY_RESEARCH_ROUNDS = 3;
-const MIN_ZERO_PROGRESS_GENERATION_ATTEMPTS = 6;
+const MIN_ZERO_PROGRESS_GENERATION_ATTEMPTS = 8;
+const SAFE_RECOVERY_BATCH_SIZE = 15;
+const FACT_CHECK_CONCURRENCY = 4;
+export const COMPACT_RESEARCH_MAX_CHARS = 18000;
+const RECOVERY_STATE_MAX_CHARS = 12000;
 
 export function generationSafetyCeiling(requestedPoiCount) {
   const count = Math.max(1, Math.min(MAX_POIS, Math.ceil(Number(requestedPoiCount) || 1)));
   return Math.min(500, Math.max(20, count * 2));
 }
 
-function zeroProgressLimit(requestedPoiCount) { return Math.max(MIN_ZERO_PROGRESS_GENERATION_ATTEMPTS, Math.ceil((Number(requestedPoiCount) || 1) / 10)); }
+function zeroProgressLimit(requestedPoiCount) { return Math.max(MIN_ZERO_PROGRESS_GENERATION_ATTEMPTS, Math.ceil((Number(requestedPoiCount) || 1) / 8)); }
+
+function textSize(value) { return typeof value === 'string' ? value.length : JSON.stringify(value || '').length; }
+function diagnosticProgress(onProgress, event) { onProgress?.({ stage: 'GENERATION DIAGNOSTICS', detail: event.detail || `${event.kind || 'generation'} accepted ${event.acceptedCount ?? 0}; remaining ${event.remainingCount ?? 0}.`, diagnostic: { ...event, apiKey: undefined } }); }
+
+export function compactResearchPacket(researchPacket = null, { maxSources = 36, maxExtracted = 18, maxChars = COMPACT_RESEARCH_MAX_CHARS } = {}) {
+  if (!researchPacket) return null;
+  const seen = new Set();
+  const sourceScore = (s) => (s.extractedText ? 60 : 0) + (s.relevanceScore || 0) + (/\.(gov|int|org)$/i.test(s.domain || '') ? 15 : 0) + (s.sourceType === 'news' ? 5 : 0);
+  const all = [...(researchPacket.retrievedSources || []), ...(researchPacket.sources || [])]
+    .filter((s) => s?.url)
+    .sort((a, b) => sourceScore(b) - sourceScore(a))
+    .filter((s) => { const key = s.canonicalUrl || s.url; if (seen.has(key)) return false; seen.add(key); return true; });
+  const domains = new Map();
+  const selected = [];
+  for (const source of all) {
+    const domain = source.domain || '';
+    const domainCount = domains.get(domain) || 0;
+    if (domainCount >= 4 && selected.length < Math.floor(maxSources * 0.75)) continue;
+    domains.set(domain, domainCount + 1);
+    selected.push(source);
+    if (selected.length >= maxSources) break;
+  }
+  let extractedKept = 0;
+  const sources = selected.map((s) => {
+    const evidence = s.extractedText && extractedKept < maxExtracted ? String(s.extractedText).replace(/\s+/g, ' ').slice(0, 700) : '';
+    if (evidence) extractedKept += 1;
+    return { url: s.url, title: s.title || s.sourceName || '', domain: s.domain || '', date: s.publicationDate || s.date || '', snippet: String(s.snippet || s.body || s.claimSupported || '').replace(/\s+/g, ' ').slice(0, 320), extractedEvidence: evidence, sourceType: s.sourceType || s.endpoint || s.searchBackend || '', researchAngle: s.query || s.ddgsQuery || '', relevance: s.relevanceScore || 0, extractionStatus: s.extractionStatus || s.retrievalStatus || '' };
+  });
+  const compact = { schema: 'compact-ddgs-research-context-v1', instructions: 'Supplemental evidence only. Gemini has no browsing/search; mark unsupported external claims MANUAL VERIFICATION instead of inventing URLs.', stats: researchPacket.stats || {}, automaticTargetCandidates: (researchPacket.automaticTargetCandidates || []).slice(0, 20), sources };
+  const json = JSON.stringify(compact);
+  if (json.length <= maxChars) return compact;
+  let trimmed = sources.slice(0, Math.max(1, Math.floor(sources.length * maxChars / json.length)));
+  while (trimmed.length > 1 && JSON.stringify({ ...compact, sources: trimmed }).length > maxChars) trimmed = trimmed.slice(0, Math.max(1, Math.floor(trimmed.length * 0.75)));
+  return { ...compact, sources: trimmed, truncated: true };
+}
+
+export function chooseRecoveryBatchSize({ remainingPoiCount, recoveryLog = [] }) {
+  const remaining = Math.max(1, Number(remainingPoiCount) || 1);
+  const recent = recoveryLog.slice(-3).filter((r) => !r.error);
+  const avgYield = recent.length ? recent.reduce((sum, r) => sum + Number(r.accepted || 0), 0) / recent.length : 10;
+  let desired = remaining <= 3 ? remaining : Math.min(SAFE_RECOVERY_BATCH_SIZE, Math.max(6, Math.ceil(Math.min(remaining, avgYield > 10 ? avgYield + 4 : avgYield < 3 ? 6 : avgYield + 2))));
+  if (remaining > SAFE_RECOVERY_BATCH_SIZE) desired = Math.min(SAFE_RECOVERY_BATCH_SIZE, Math.max(8, desired));
+  return Math.min(remaining, desired);
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length); let index = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
+    while (index < items.length) { const current = index++; results[current] = await worker(items[current], current); }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 export function assertGenerationCompleteBeforeFactCheck(mission, requestedPoiCount) {
   const usablePoiCount = (mission.chits || []).length;
@@ -28,7 +85,8 @@ export async function generateMission({ form, sliders, selectedTargets, targetin
   onProgress?.({ stage: 'READING AGENDA', detail: 'Reading committee, agenda and portfolio inputs.', done: 0, total: poiCount });
   onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: 'Starting official DDGS API URL discovery.', done: 0, total: poiCount });
   const researchPacket = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount, onProgress });
-  const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes, researchPacket });
+  const compactResearch = compactResearchPacket(researchPacket);
+  const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes, researchPacket: compactResearch });
   onProgress?.({ stage: 'ANALYZING PORTFOLIO', detail: 'Analyzing portfolio foreign-policy interests.', done: 0, total: poiCount });
   onProgress?.({ stage: 'ANALYZING FOREIGN POLICY', detail: 'Mapping foreign-policy alignment and constraints.', done: 0, total: poiCount });
   onProgress?.({ stage: 'MAPPING TARGETS', detail: 'Mapping selected and global target opportunities.', done: 0, total: poiCount });
@@ -38,10 +96,10 @@ export async function generateMission({ form, sliders, selectedTargets, targetin
   let response;
   let mission;
   if (batchSizes.length === 1) {
-    response = await callGemini(form.apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA, attachments: form.backgroundGuide?.data ? [form.backgroundGuide] : [], onModelStatus: (status) => onProgress?.({ stage: 'MAPPING TARGETS', detail: `Using ${status.model.displayName} for ${status.mode}.`, done: 0, total: poiCount }) });
+    response = await callGemini(form.apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA, attemptKind: 'initial', onGenerationDiagnostic: (d) => diagnosticProgress(onProgress, { ...d, globalRequestedPoiCount: poiCount, currentAcceptedCount: 0, batchRequestedCount: poiCount, researchPacketSize: textSize(compactResearch), recoveryContextSize: 0 }), attachments: form.backgroundGuide?.data ? [form.backgroundGuide] : [], onModelStatus: (status) => onProgress?.({ stage: 'MAPPING TARGETS', detail: `Using ${status.model.displayName} for ${status.mode}.`, done: 0, total: poiCount }) });
     mission = await recoverMission({ apiKey: form.apiKey, text: response.text, ctx: { form, sliders, includeFollowUp, poiCount, targetingMode, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
   } else {
-    mission = await generateBatchedMission({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes, researchPacket, batchSizes, modelSelection, onProgress });
+    mission = await generateBatchedMission({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes, researchPacket: compactResearch, batchSizes, modelSelection, onProgress });
     response = mission._response;
     delete mission._response;
   }
@@ -50,7 +108,7 @@ export async function generateMission({ form, sliders, selectedTargets, targetin
   onProgress?.({ stage: 'VALIDATING STRUCTURE', detail: `${mission.chits.length}/${poiCount} usable POIs normalized. Validating source structures...`, done: mission.chits.length, total: poiCount });
   mission.chits = await Promise.all(mission.chits.map(async (poi) => ({ ...poi, evidence: await validateSources(poi.evidence || []) })));
   onProgress?.({ stage: 'CALCULATING PRESSURE', detail: 'Calculating local pressure, word count, line and speaking-time metrics.', done: mission.chits.length, total: poiCount });
-  mission = await runFactChecks({ mission, form, apiKey: form.apiKey, primaryModel: response.model, modelSelection, onProgress });
+  mission = await runFactChecks({ mission, form, apiKey: form.apiKey, primaryModel: response.model, modelSelection, discoveredModels: await discoverGeminiModels(form.apiKey), onProgress });
   mission.validationProblems = validateMissionResponse(mission, { targetingMode, poiCount, portfolio: form.portfolio, freezeDate: form.freezeDate });
   mission.metadata = { ...(mission.metadata || {}), researchPacketStats: researchPacket.stats, ddgsQueries: researchPacket.queries };
   return { ...mission, researchPacket, modelInfo: { model: response.model, factCheckModel: mission.metadata.factCheckModel, mode: response.mode, fallbackLog: response.fallbackLog } };
@@ -132,25 +190,25 @@ function combineFactChecks(first, second) {
   return { status: 'MANUAL VERIFICATION', confidence: Math.round((first.confidence + second.confidence) / 2), claims: [...first.claims, ...second.claims], legalAssessment: first.legalAssessment, classificationAssessment: first.classificationAssessment };
 }
 
-async function runFactChecks({ mission, form, apiKey, primaryModel, modelSelection, onProgress }) {
-  const updated = []; let factCheckModel = '';
-  for (let i = 0; i < mission.chits.length; i += 1) {
-    const poi = mission.chits[i];
-    onProgress?.({ stage: 'FACT CHECK PASS 1', detail: `Fact-check pass 1 for POI ${i + 1}/${mission.chits.length}.`, done: i, total: mission.chits.length });
+async function runFactChecks({ mission, form, apiKey, primaryModel, modelSelection, discoveredModels, onProgress }) {
+  let factCheckModel = '';
+  const updated = await mapWithConcurrency(mission.chits, FACT_CHECK_CONCURRENCY, async (poi, i) => {
+    onProgress?.({ stage: 'FACT CHECKING', detail: `Fact-checking POI ${i + 1}/${mission.chits.length} with bounded concurrency ${FACT_CHECK_CONCURRENCY}.`, done: i, total: mission.chits.length });
     try {
-      const first = await callFactCheck(apiKey, buildFactCheckPrompt({ form, poi, pass: 1 }), { primaryModelId: primaryModel.id, modelSelection });
-      onProgress?.({ stage: 'FACT CHECK PASS 2', detail: `Fact-check pass 2 for POI ${i + 1}/${mission.chits.length}.`, done: i, total: mission.chits.length });
-      const second = await callFactCheck(apiKey, buildFactCheckPrompt({ form, poi, pass: 2 }), { primaryModelId: primaryModel.id, modelSelection });
+      const first = await callFactCheck(apiKey, buildFactCheckPrompt({ form, poi, pass: 1 }), { primaryModelId: primaryModel.id, modelSelection, discoveredModels });
+      const second = await callFactCheck(apiKey, buildFactCheckPrompt({ form, poi, pass: 2 }), { primaryModelId: primaryModel.id, modelSelection, discoveredModels });
       factCheckModel = second.model.displayName;
-      { const combined = combineFactChecks(normalizeFactCheck(extractJson(first.text)), normalizeFactCheck(extractJson(second.text))); updated.push({ ...poi, factCheck: combined, evidence: applyFactCheckToSources(poi.evidence || [], combined) }); }
+      const combined = combineFactChecks(normalizeFactCheck(extractJson(first.text)), normalizeFactCheck(extractJson(second.text)));
+      return { ...poi, factCheck: combined, evidence: applyFactCheckToSources(poi.evidence || [], combined) };
     } catch {
-      updated.push({ ...poi, factCheck: { status: 'MANUAL VERIFICATION', confidence: 0, claims: [], legalAssessment: { status: 'UNCERTAIN', reason: 'Fact-check unavailable; verify evidence manually.' }, classificationAssessment: { status: 'UNCERTAIN', reason: 'Classification could not be independently verified.' } } });
+      return { ...poi, factCheck: { status: 'MANUAL VERIFICATION', confidence: 0, claims: [], legalAssessment: { status: 'UNCERTAIN', reason: 'Fact-check unavailable; verify evidence manually.' }, classificationAssessment: { status: 'UNCERTAIN', reason: 'Classification could not be independently verified.' } } };
     }
-  }
+  });
   mission.chits = updated;
   mission.targets = mission.targets.map((target) => ({ ...target, pois: updated.filter((poi) => poi.target === target.country) }));
   onProgress?.({ stage: 'FINALIZING CHITS', detail: 'Final verification states calculated and chits finalized.', done: mission.chits.length, total: mission.chits.length });
   mission.metadata.factCheckModel = factCheckModel || 'Unavailable';
+  mission.metadata.factCheckConcurrency = FACT_CHECK_CONCURRENCY;
   return mission;
 }
 
@@ -341,11 +399,13 @@ async function generateBatchedMission({ form, sliders, selectedTargets, targetin
     const batchCount = batchSizes[i];
     onProgress?.({ stage: 'GENERATING POIs', detail: `Generating batch ${i + 1}/${batchSizes.length} (${batchCount} POIs).`, done: previous.length, total: poiCount });
     const batchPrompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount: batchCount, poiTypes, researchPacket, batchNumber: i + 1, totalBatches: batchSizes.length, previousPoiMetadata: compactPoiMetadata(previous) });
-    const response = await callGemini(form.apiKey, batchPrompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA, attachments: i === 0 && form.backgroundGuide?.data ? [form.backgroundGuide] : [], onModelStatus: (status) => onProgress?.({ stage: 'GENERATING POIs', detail: `Using ${status.model.displayName} for batch ${i + 1}.`, done: previous.length, total: poiCount }) });
+    const response = await callGemini(form.apiKey, batchPrompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA, attemptKind: 'batch', onGenerationDiagnostic: (d) => diagnosticProgress(onProgress, { ...d, globalRequestedPoiCount: poiCount, currentAcceptedCount: previous.length, batchRequestedCount: batchCount, researchPacketSize: textSize(researchPacket), recoveryContextSize: textSize(compactPoiMetadata(previous)) }), attachments: i === 0 && form.backgroundGuide?.data ? [form.backgroundGuide] : [], onModelStatus: (status) => onProgress?.({ stage: 'GENERATING POIs', detail: `Using ${status.model.displayName} for batch ${i + 1}.`, done: previous.length, total: poiCount }) });
     responseInfo = response;
     const batchMission = await recoverMission({ apiKey: form.apiKey, text: response.text, ctx: { form, sliders, includeFollowUp, poiCount: batchCount, targetingMode, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
-    const deduped = batchMission.chits.filter((chit) => !findDuplicatePoiIndexes([...previous, chit]).includes(previous.length));
-    const duplicateRejected = batchMission.chits.length - deduped.length;
+    const batchMerge = appendUniquePois(previous, batchMission.chits, poiCount);
+    const deduped = batchMerge.accepted.slice(previous.length);
+    const duplicateRejected = batchMerge.duplicateRejected;
+    diagnosticProgress(onProgress, { kind: 'batch-normalized', globalRequestedPoiCount: poiCount, currentAcceptedCount: previous.length, batchRequestedCount: batchCount, rawCandidateCount: batchMission.diagnostics?.candidatesFound || 0, parsedCandidateCount: batchMission.diagnostics?.parseSucceeded === false ? 0 : (batchMission.diagnostics?.candidatesFound || 0), normalizedCandidateCount: batchMission.chits.length, validationRejectedCount: Math.max(0, (batchMission.diagnostics?.candidatesFound || 0) - batchMission.chits.length), duplicateRejectedCount: duplicateRejected, acceptedCount: deduped.length, remainingCount: Math.max(0, poiCount - previous.length - deduped.length) });
     batchDiagnostics.push({ batch: i + 1, requested: batchCount, candidatesFound: batchMission.diagnostics?.candidatesFound || 0, normalizedPois: batchMission.diagnostics?.normalizedPois || batchMission.chits.length, accepted: deduped.length, duplicateRejected, parseSucceeded: batchMission.diagnostics?.parseSucceeded, parseError: batchMission.diagnostics?.parseError || '' });
     previous.push(...deduped);
     onProgress?.({ stage: 'GENERATING POIs', detail: `Batch ${i + 1}/${batchSizes.length}: ${deduped.length}/${batchCount} accepted (${duplicateRejected} duplicate rejection${duplicateRejected === 1 ? '' : 's'}).`, done: previous.length, total: poiCount });
@@ -364,8 +424,18 @@ export function analyzeRetention({ before = [], after = [], requested = 0 } = {}
   const validationRejections = Math.max(0, before.length - after.length - duplicateCount);
   return { requested, returned: before.length, retained: after.length, duplicateCount, evidenceFailures, validationRejections, underProduced: Math.max(0, requested - before.length), remaining: Math.max(0, requested - after.length) };
 }
+function appendUniquePois(existing = [], candidates = [], limit = MAX_POIS) {
+  const accepted = [...existing]; let duplicateRejected = 0;
+  for (const candidate of candidates || []) {
+    if (accepted.length >= limit) break;
+    if (findDuplicatePoiIndexes([...accepted, candidate]).includes(accepted.length)) { duplicateRejected += 1; continue; }
+    accepted.push(candidate);
+  }
+  return { accepted, duplicateRejected };
+}
 export function mergeRecoveryCandidates(mission, candidates, poiCount) {
-  return dedupeMission({ ...mission, chits: [...(mission.chits || []), ...(candidates || [])] }, poiCount);
+  const { accepted } = appendUniquePois(mission.chits || [], candidates || [], poiCount);
+  return dedupeMission({ ...mission, chits: accepted }, poiCount);
 }
 function dedupeMission(mission, poiCount) {
   const duplicates = findDuplicatePoiIndexes(mission.chits);
@@ -381,7 +451,7 @@ function recoveryFocus(level, analysis) {
   return pieces.join(' ');
 }
 
-function recoveryContextSummary({ current, requestedPoiCount, remainingPoiCount, recoveryLog }) {
+export function buildCompactRecoveryState({ current, requestedPoiCount, remainingPoiCount, recoveryRequestCount = remainingPoiCount, recoveryLog = [] }) {
   const accepted = compactPoiMetadata(current.chits || []);
   const targetCounts = new Map();
   const pressureCounts = new Map();
@@ -393,25 +463,35 @@ function recoveryContextSummary({ current, requestedPoiCount, remainingPoiCount,
     pressureCounts.set(String(pressure).slice(0, 140), (pressureCounts.get(String(pressure).slice(0, 140)) || 0) + 1);
     for (const item of poi.evidence || []) if (item.url || item.sourceName) evidence.add(item.url || item.sourceName);
   }
-  const overusedTargets = [...targetCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
-  const overusedPressures = [...pressureCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
-  const rejectedPatterns = (recoveryLog || []).slice(-5).map((entry) => ({ level: entry.level, duplicateRejected: entry.duplicateRejected || 0, validationRejected: entry.validationRejected || 0, accepted: entry.accepted || 0, remaining: entry.remainingAfter ?? entry.remaining }));
+  const state = {
+    requestedPoiCount,
+    acceptedCount: (current.chits || []).length,
+    remainingPoiCount,
+    recoveryRequestCount,
+    targetCounts: [...targetCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8),
+    pressureFamilies: [...pressureCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12),
+    usedEvidence: [...evidence].slice(0, 120),
+    recentRejections: (recoveryLog || []).slice(-6).map((entry) => ({ level: entry.level, requested: entry.requested, duplicateRejected: entry.duplicateRejected || 0, validationRejected: entry.validationRejected || 0, accepted: entry.accepted || 0, remaining: entry.remainingAfter ?? entry.remaining })),
+    acceptedPoiMetadata: accepted,
+  };
+  const json = JSON.stringify(state);
+  if (json.length <= RECOVERY_STATE_MAX_CHARS) return state;
+  let kept = accepted.slice(0, Math.max(1, Math.floor(accepted.length * RECOVERY_STATE_MAX_CHARS / json.length)));
+  let compact = { ...state, acceptedPoiMetadata: kept, truncated: true };
+  while (kept.length > 1 && JSON.stringify(compact).length > RECOVERY_STATE_MAX_CHARS) { kept = kept.slice(0, Math.max(1, Math.floor(kept.length * 0.75))); compact = { ...state, acceptedPoiMetadata: kept, truncated: true }; }
+  if (JSON.stringify(compact).length > RECOVERY_STATE_MAX_CHARS) compact = { requestedPoiCount, acceptedCount: state.acceptedCount, remainingPoiCount, recoveryRequestCount, targetCounts: state.targetCounts, pressureFamilies: state.pressureFamilies.slice(0, 6), usedEvidence: state.usedEvidence.slice(0, 40), recentRejections: state.recentRejections, acceptedPoiMetadata: kept.slice(0, 1), truncated: true };
+  return compact;
+}
+
+function recoveryContextSummary(recoveryState) {
   return `
 RECOVERY STATE — DO NOT IGNORE:
-REQUESTED COUNT: ${requestedPoiCount}
-CURRENT ACCEPTED COUNT: ${(current.chits || []).length}
-REMAINING COUNT: ${remainingPoiCount}
-ALREADY ACCEPTED POIs / PRESSURE METADATA:
-${JSON.stringify(accepted).slice(0, 22000)}
-ALREADY USED TARGET COUNTS:
-${JSON.stringify(overusedTargets)}
-ALREADY USED PRESSURE POINTS:
-${JSON.stringify(overusedPressures)}
-ALREADY USED EVIDENCE URLS / SOURCES:
-${JSON.stringify([...evidence].slice(0, 120)).slice(0, 12000)}
-RECENT REJECTED / DUPLICATE PATTERNS:
-${JSON.stringify(rejectedPatterns)}
-Generate ONLY the ${remainingPoiCount} missing distinct POIs. Bias toward underrepresented targets, underused evidence, and pressure angles not represented above. A prior under-filled batch is not failure; continue with new distinct usable POIs.`;
+${JSON.stringify(recoveryState).slice(0, RECOVERY_STATE_MAX_CHARS)}
+GLOBAL TASK: ${recoveryState.requestedPoiCount} POIs total.
+CURRENT: ${recoveryState.acceptedCount} accepted.
+REMAINING: ${recoveryState.remainingPoiCount}.
+THIS BATCH: Generate exactly ${recoveryState.recoveryRequestCount} candidates.
+Do NOT attempt to generate all ${recoveryState.remainingPoiCount} remaining POIs in this response. ChitForge will run additional bounded batches if needed.`;
 }
 
 export async function recoverPoiShortfallLoop({ mission, poiCount, generateCandidates, onProgress, initialRecoveryLog = [] }) {
@@ -427,14 +507,16 @@ export async function recoverPoiShortfallLoop({ mission, poiCount, generateCandi
     const analysis = analyzeRetention({ before: current.chits, after: current.chits, requested: requestedPoiCount });
     onProgress?.({ stage: 'RECOVERING GENERATION', detail: `${usablePoiCount} / ${requestedPoiCount} valid POIs — generating remaining ${remainingPoiCount}.`, done: usablePoiCount, total: requestedPoiCount });
     const beforeCount = current.chits.length;
-    const batchRecord = { level, requested: remainingPoiCount, requestedPoiCount, usableBefore: usablePoiCount, remainingBefore: remainingPoiCount };
+    const recoveryRequestCount = chooseRecoveryBatchSize({ remainingPoiCount, recoveryLog });
+    const batchRecord = { level, requested: recoveryRequestCount, requestedPoiCount, usableBefore: usablePoiCount, remainingBefore: remainingPoiCount };
     try {
-      const result = await generateCandidates({ level, requestedPoiCount, usablePoiCount, remainingPoiCount, current, analysis, recoveryLog });
+      const result = await generateCandidates({ level, requestedPoiCount, usablePoiCount, remainingPoiCount, recoveryRequestCount, current, analysis, recoveryLog });
       const candidates = result?.candidates || [];
       const diagnostics = result?.diagnostics || {};
       const merged = mergeRecoveryCandidates(current, candidates, requestedPoiCount);
       const accepted = merged.chits.length - beforeCount;
       Object.assign(batchRecord, { rawCandidates: diagnostics.candidatesFound ?? candidates.length, parsed: diagnostics.parseSucceeded === false ? 0 : (diagnostics.candidatesFound ?? candidates.length), normalized: diagnostics.normalizedPois ?? candidates.length, validationRejected: Math.max(0, (diagnostics.candidatesFound ?? candidates.length) - (diagnostics.normalizedPois ?? candidates.length)), duplicateRejected: Math.max(0, candidates.length - accepted), accepted, remainingAfter: Math.max(0, requestedPoiCount - merged.chits.length), parseSucceeded: diagnostics.parseSucceeded, parseError: diagnostics.parseError || '' });
+      diagnosticProgress(onProgress, { kind: 'recovery-normalized', globalRequestedPoiCount: requestedPoiCount, currentAcceptedCount: beforeCount, batchRequestedCount: recoveryRequestCount, recoveryRequestedCount: recoveryRequestCount, rawCandidateCount: batchRecord.rawCandidates, parsedCandidateCount: batchRecord.parsed, normalizedCandidateCount: batchRecord.normalized, validationRejectedCount: batchRecord.validationRejected, duplicateRejectedCount: batchRecord.duplicateRejected, acceptedCount: accepted, remainingCount: Math.max(0, requestedPoiCount - merged.chits.length) });
       current = { ...merged, recommendedTargets: [...(current.recommendedTargets || []), ...(result?.recommendedTargets || [])] };
       consecutiveZeroProgress = accepted > 0 ? 0 : consecutiveZeroProgress + 1;
       onProgress?.({ stage: 'RECOVERING GENERATION', detail: `Recovery batch ${level}: accepted ${accepted}; ${current.chits.length}/${requestedPoiCount} complete; ${Math.max(0, requestedPoiCount - current.chits.length)} remaining.`, done: current.chits.length, total: requestedPoiCount });
@@ -448,22 +530,25 @@ export async function recoverPoiShortfallLoop({ mission, poiCount, generateCandi
   return current;
 }
 export async function recoverShortfall({ form, sliders, selectedTargets, targetingMode, includeFollowUp, mission, poiCount, poiTypes, modelSelection, researchPacket, onProgress }) {
-  let packet = researchPacket;
+  let rawPacket = researchPacket;
+  let packet = compactResearchPacket(rawPacket);
   let recoveryResearchRounds = 0;
   const generated = await recoverPoiShortfallLoop({
     mission,
     poiCount,
     onProgress,
-    generateCandidates: async ({ level, requestedPoiCount, remainingPoiCount, current, analysis, recoveryLog }) => {
+    generateCandidates: async ({ level, requestedPoiCount, remainingPoiCount, recoveryRequestCount, current, analysis, recoveryLog }) => {
       if (packet?.needsSupplementalRecoveryResearch && level >= 2 && recoveryResearchRounds < MAX_RECOVERY_RESEARCH_ROUNDS && (analysis.evidenceFailures || analysis.duplicateCount || level >= 3)) {
         recoveryResearchRounds += 1;
         onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Recovery research round ${recoveryResearchRounds}/${MAX_RECOVERY_RESEARCH_ROUNDS}: reusing existing corpus and extracting only new URLs.`, done: current.chits.length, total: requestedPoiCount });
-        const expansion = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount: requestedPoiCount, researchState: packet?.researchState, onProgress });
-        packet = { ...(packet || {}), ...expansion, sources: expansion.sources || [], retrievedSources: expansion.retrievedSources || [], failures: expansion.failures || [], researchState: expansion.researchState, recoveryExpansions: [...(packet?.recoveryExpansions || []), expansion.stats] };
+        const expansion = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount: requestedPoiCount, researchState: rawPacket?.researchState, onProgress });
+        rawPacket = { ...(rawPacket || {}), ...expansion, sources: expansion.sources || [], retrievedSources: expansion.retrievedSources || [], failures: expansion.failures || [], researchState: expansion.researchState, recoveryExpansions: [...(rawPacket?.recoveryExpansions || []), expansion.stats] };
+        packet = compactResearchPacket(rawPacket);
       }
-      const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount: remainingPoiCount, poiTypes, researchPacket: packet, batchNumber: level, totalBatches: generationSafetyCeiling(requestedPoiCount), previousPoiMetadata: compactPoiMetadata(current.chits) }) + `\n\nRECOVERY INSTRUCTIONS: ${recoveryFocus(level, analysis)} Need exactly ${remainingPoiCount} more final POIs, not a summary and not fewer by choice. Return ${remainingPoiCount} candidate POIs; ChitForge will keep only defensible non-duplicates.` + recoveryContextSummary({ current, requestedPoiCount, remainingPoiCount, recoveryLog });
-      const response = await callGemini(form.apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA });
-      const extra = await recoverMission({ apiKey: form.apiKey, text: response.text, ctx: { form, sliders, includeFollowUp, poiCount: remainingPoiCount, targetingMode: `recovery-${level}`, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
+      const recoveryState = buildCompactRecoveryState({ current, requestedPoiCount, remainingPoiCount, recoveryRequestCount, recoveryLog });
+      const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount: recoveryRequestCount, poiTypes, researchPacket: packet, batchNumber: level, totalBatches: generationSafetyCeiling(requestedPoiCount), previousPoiMetadata: [] }) + `\n\nRECOVERY INSTRUCTIONS: ${recoveryFocus(level, analysis)} ChitForge will keep only defensible non-duplicates.` + recoveryContextSummary(recoveryState);
+      const response = await callGemini(form.apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA, attemptKind: 'recovery', onGenerationDiagnostic: (d) => diagnosticProgress(onProgress, { ...d, globalRequestedPoiCount: requestedPoiCount, currentAcceptedCount: current.chits.length, batchRequestedCount: recoveryRequestCount, recoveryRequestedCount: recoveryRequestCount, researchPacketSize: textSize(packet), recoveryContextSize: textSize(recoveryState) }) });
+      const extra = await recoverMission({ apiKey: form.apiKey, text: response.text, ctx: { form, sliders, includeFollowUp, poiCount: recoveryRequestCount, targetingMode: `recovery-${level}`, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
       return { candidates: extra.chits, diagnostics: extra.diagnostics, recommendedTargets: extra.recommendedTargets };
     },
   });
