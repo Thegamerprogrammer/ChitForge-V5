@@ -103,7 +103,7 @@ export async function generateMission({ form, sliders, selectedTargets, targetin
     response = mission._response;
     delete mission._response;
   }
-  mission = await recoverShortfall({ form, sliders, selectedTargets, targetingMode, includeFollowUp, mission, poiCount, poiTypes, modelSelection, researchPacket, onProgress });
+  mission = await recoverShortfall({ form, sliders, selectedTargets, targetingMode, includeFollowUp, mission, poiCount, poiTypes, modelSelection, researchPacket: compactResearch, onProgress });
   assertGenerationCompleteBeforeFactCheck(mission, poiCount);
   onProgress?.({ stage: 'VALIDATING STRUCTURE', detail: `${mission.chits.length}/${poiCount} usable POIs normalized. Validating source structures...`, done: mission.chits.length, total: poiCount });
   mission.chits = await Promise.all(mission.chits.map(async (poi) => ({ ...poi, evidence: await validateSources(poi.evidence || []) })));
