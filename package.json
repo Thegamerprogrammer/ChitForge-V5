@@ -13,7 +13,8 @@
     "test:scaling-ux": "node src/scalingUx.test.mjs",
     "test:ddgs": "node src/ddgsResearch.test.mjs",
     "test:recovery": "node src/recoveryOrchestration.test.mjs",
-    "test:map": "node src/mapInteraction.test.mjs"
+    "test:map": "node src/mapInteraction.test.mjs",
+    "test:gemini": "node src/gemini.test.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.16.0",

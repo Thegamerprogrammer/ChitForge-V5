@@ -1,53 +1,56 @@
 const DDGS_BASE_URL = 'http://127.0.0.1:4479';
-export const DDGS_LIMITS = { minHardMax: 80, absoluteSafetyCeiling: 650, searchConcurrency: 1, extractConcurrency: 2, retries: 1, timeoutMs: 9000, searchPaceMs: 1000, extractPaceMs: 750, backoffBaseMs: 350, queryMaxChars: 180 };
+const DDGS_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
+const DDGS_SEARCH_DELAY = { textMinMs: 2200, textMaxMs: 3800, newsMinMs: 2500, newsMaxMs: 4500, extractMinMs: 1500, extractMaxMs: 2500 };
+const DDGS_RETRY_DELAYS = [8000, 16000, 32000, 64000];
+const DDGS_BATCH_SIZES = [10, 10, 8, 8, 6, 6, 5, 5, 4, 4];
+
+export const DDGS_LIMITS = { preferredMin: 60, preferredMax: 120, softMax: 140, hardMax: 160 };
+export const DDGS_NEWS_BACKEND = 'duckduckgo';
 export const DDGS_TEXT_BACKEND = 'duckduckgo';
 export const DDGS_BACKENDS = [DDGS_TEXT_BACKEND];
-export const SEARCH_STATUS = { SUCCESS: 'SUCCESS', NO_RESULTS_FOR_QUERY: 'NO_RESULTS_FOR_QUERY', RATE_LIMITED: 'RATE_LIMITED', TIMEOUT: 'TIMEOUT', CONNECTION_ERROR: 'CONNECTION_ERROR', DDGS_UPSTREAM_ERROR: 'DDGS_UPSTREAM_ERROR', SEARCH_FAILED: 'SEARCH_FAILED' };
+export const DDGS_SCHEDULING = { searchDelay: DDGS_SEARCH_DELAY, retryDelays: DDGS_RETRY_DELAYS, maxSearchRetries: DDGS_RETRY_DELAYS.length, maxExtractedSources: 25, searchConcurrency: 1, extractConcurrency: 1, queryMaxChars: 180, userAgent: DDGS_USER_AGENT };
+export const SEARCH_STATUS = { SUCCESS: 'SUCCESS', TRUE_EMPTY_RESULT: 'TRUE_EMPTY_RESULT', NO_RESULTS_FOR_QUERY: 'TRUE_EMPTY_RESULT', RATE_LIMITED: 'RATE_LIMITED', TIMEOUT: 'TIMEOUT', CONNECTION_ERROR: 'CONNECTION_ERROR', DDGS_UPSTREAM_ERROR: 'DDGS_UPSTREAM_FAILURE', SEARCH_FAILED: 'SEARCH_FAILED' };
 export const EXTRACTION_STATUS = { DISCOVERED: 'DISCOVERED_FROM_SEARCH', RETRIEVED: 'RETRIEVED', DISCOVERED_NOT_RETRIEVED: 'DISCOVERED_NOT_RETRIEVED', DISCOVERED_DIRECT_EXTRACTION_BLOCKED: 'DISCOVERED_DIRECT_EXTRACTION_BLOCKED', RATE_LIMITED: 'RATE_LIMITED', DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR: 'DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR', DISCOVERED_NOT_RETRIEVED_TIMEOUT: 'DISCOVERED_NOT_RETRIEVED_TIMEOUT', DISCOVERED_NOT_RETRIEVED_NETWORK: 'DISCOVERED_NOT_RETRIEVED_NETWORK' };
 
 export function canonicalUrl(raw = '') { try { const url = new URL(raw); url.hash = ''; ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'fbclid', 'gclid'].forEach((key) => url.searchParams.delete(key)); url.hostname = url.hostname.replace(/^www\./, '').toLowerCase(); url.pathname = url.pathname.replace(/\/$/, ''); return url.toString(); } catch { return ''; } }
 export function domainFromResult(url = '') { try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; } }
 export function bangUrl(domain, query) { return domain ? `https://duckduckgo.com/?q=${encodeURIComponent(`!site:${domain} ${query}`)}` : ''; }
+export function randomDelay(minMs, maxMs, rng = Math.random) { return minMs + rng() * (maxMs - minMs); }
 
-export function planResearchBudget({ poiCount = 20, selectedTargets = [], automaticTargetCount = 0, sliders = {}, form = {}, coverageGaps = 0 } = {}) {
+export function planResearchBudget({ poiCount = 20 } = {}) {
   const count = Math.max(1, Math.min(250, Number(poiCount) || 20));
-  const baseMin = Math.round(Math.max(25, count * (0.85 + 0.25 * Math.sqrt(count / 20))));
-  const baseMax = Math.round(Math.max(baseMin + 15, count * (2.15 - 0.15 * Math.sqrt(20 / count))));
-  const targetFactor = Math.min(90, ((selectedTargets?.length || 0) * 6) + (automaticTargetCount * 5));
-  const complexity = Math.min(80, (String(form.agenda || '').length / 45) + (form.backgroundGuide ? 28 : 0) + (String(form.researchNotes || '').length / 60) + ((sliders.controversy || 0) / 2.5) + (coverageGaps * 12));
-  const preferredMin = Math.min(500, Math.round(baseMin + targetFactor * 0.45 + complexity * 0.35));
-  const preferredMax = Math.min(500, Math.round(baseMax + targetFactor + complexity));
-  const softMax = Math.min(550, Math.max(preferredMax, Math.round(preferredMax * 1.12)));
-  const hardMax = Math.min(DDGS_LIMITS.absoluteSafetyCeiling, Math.max(DDGS_LIMITS.minHardMax, Math.round(softMax * 1.18)));
-  const extractMax = Math.min(180, Math.max(25, Math.round(preferredMin * 0.45)));
-  return { preferredMin, preferredMax, softMax, hardMax, extractMax, absoluteSafetyCeiling: DDGS_LIMITS.absoluteSafetyCeiling };
+  const targetUrls = count <= 50 ? 60 : count <= 100 ? 80 : count <= 150 ? 100 : count <= 200 ? 130 : 150;
+  return { preferredMin: DDGS_LIMITS.preferredMin, preferredMax: DDGS_LIMITS.preferredMax, softMax: DDGS_LIMITS.softMax, hardMax: DDGS_LIMITS.hardMax, targetUrls: Math.min(DDGS_LIMITS.hardMax, targetUrls), extractMax: DDGS_SCHEDULING.maxExtractedSources, absoluteSafetyCeiling: DDGS_LIMITS.hardMax };
 }
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-function jitter(ms) { return ms + Math.round(Math.random() * Math.max(40, ms * 0.35)); }
-async function fetchWithTimeout(url, options = {}, timeoutMs = DDGS_LIMITS.timeoutMs, fetchImpl = fetch) { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs); try { return await fetchImpl(url, { ...options, signal: controller.signal }); } finally { clearTimeout(timer); } }
+function browserHeaders(extra = {}) { return { 'User-Agent': DDGS_USER_AGENT, Accept: 'application/json, text/plain, */*', 'Accept-Language': 'en-US,en;q=0.9', Referer: 'https://duckduckgo.com/', ...extra }; }
+async function defaultDelay(ms) { await sleep(ms); }
+async function fetchWithTimeout(url, options = {}, timeoutMs = 9000, fetchImpl = fetch) { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs); try { return await fetchImpl(url, { ...options, signal: controller.signal }); } finally { clearTimeout(timer); } }
 function bodyText(value = '') { return String(value || '').toLowerCase(); }
+
 export function classifySearchFailure({ status = 0, body = '', error } = {}) {
   const text = bodyText(`${body} ${error?.message || error || ''}`);
-  if (/no results found|no result|no_results/.test(text)) return SEARCH_STATUS.NO_RESULTS_FOR_QUERY;
-  if (status === 429 || /rate.?limit|too many requests|ratelimit/.test(text)) return SEARCH_STATUS.RATE_LIMITED;
+  if ([202, 403, 429].includes(status) || /rate.?limit|too many requests|ratelimit|anomaly|challenge/.test(text)) return SEARCH_STATUS.RATE_LIMITED;
+  if ([500, 502, 503, 504].includes(status)) return SEARCH_STATUS.DDGS_UPSTREAM_ERROR;
+  if (/no results found|no result|no_results/.test(text)) return SEARCH_STATUS.TRUE_EMPTY_RESULT;
   if (error?.name === 'AbortError' || /timeout|timed out|time out/.test(text)) return SEARCH_STATUS.TIMEOUT;
-  if (/econn|connection|network|dns|enotfound|getaddrinfo|tls|ssl|certificate/.test(text)) return SEARCH_STATUS.CONNECTION_ERROR;
+  if (/econn|connection|network|dns|enotfound|getaddrinfo|tls|ssl|certificate|protocol|reset/.test(text)) return SEARCH_STATUS.CONNECTION_ERROR;
   if (status >= 500 || /upstream|engine|backend|provider/.test(text)) return SEARCH_STATUS.DDGS_UPSTREAM_ERROR;
   return SEARCH_STATUS.SEARCH_FAILED;
 }
 export function classifyExtractionFailure({ status = 0, body = '', error } = {}) {
   const text = bodyText(`${body} ${error?.message || error || ''}`);
-  if (status === 403) return EXTRACTION_STATUS.DISCOVERED_DIRECT_EXTRACTION_BLOCKED;
+  if ([202, 401, 403].includes(status) || /robots|challenge/.test(text)) return EXTRACTION_STATUS.DISCOVERED_DIRECT_EXTRACTION_BLOCKED;
   if (status === 404) return EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED;
   if (status === 429 || /rate.?limit|too many requests/.test(text)) return EXTRACTION_STATUS.RATE_LIMITED;
   if (error?.name === 'AbortError' || /timeout|timed out|time out/.test(text)) return EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_TIMEOUT;
-  if (/econn|connection|network|dns|enotfound|getaddrinfo|tls|ssl|certificate/.test(text)) return EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_NETWORK;
+  if (/econn|connection|network|dns|enotfound|getaddrinfo|tls|ssl|certificate|protocol|reset/.test(text)) return EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_NETWORK;
   if (status >= 500) return EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR;
   return EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED;
 }
-function shouldRetrySearch(status) { return [SEARCH_STATUS.RATE_LIMITED, SEARCH_STATUS.TIMEOUT, SEARCH_STATUS.CONNECTION_ERROR, SEARCH_STATUS.DDGS_UPSTREAM_ERROR].includes(status); }
-function shouldRetryExtract(status) { return [EXTRACTION_STATUS.RATE_LIMITED, EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_TIMEOUT, EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_NETWORK, EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_UPSTREAM_ERROR].includes(status); }
-
+function isTransientSearchStatus(status) { return [SEARCH_STATUS.RATE_LIMITED, SEARCH_STATUS.TIMEOUT, SEARCH_STATUS.CONNECTION_ERROR, SEARCH_STATUS.DDGS_UPSTREAM_ERROR].includes(status); }
+function isThrottleStatus(status) { return [SEARCH_STATUS.RATE_LIMITED, SEARCH_STATUS.DDGS_UPSTREAM_ERROR].includes(status); }
 
 const QUERY_STOP_PHRASES = [/RECOVERY LEVEL\s+\d+:[\s\S]*/gi, /Return STRICT JSON[\s\S]*/gi, /Required JSON shape:[\s\S]*/gi, /PREVIOUS POI METADATA[\s\S]*/gi, /VALIDATION(?: PROBLEMS?| OUTPUT)?:[\s\S]*/gi, /GENERATION BATCH:[\s\S]*/gi];
 const QUERY_DROP_WORDS = /\b(generate|regenerate|defensible|pois?|candidates?|oversample|batch|schema|json|gemini|chitforge|instructions?|validation|rejected|missing|duplicate|duplicates|previous|pipeline|progress|recovering|recovery)\b/gi;
@@ -60,35 +63,74 @@ export function normalizeDdgsQuery(raw = '') {
   const words = query.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
   const deduped = [];
   const seen = new Set();
-  for (const word of words) {
-    const key = word.toLowerCase();
-    if (seen.has(key) && word.length > 3) continue;
-    seen.add(key); deduped.push(word);
-  }
+  for (const word of words) { const key = word.toLowerCase(); if (seen.has(key) && word.length > 3) continue; seen.add(key); deduped.push(word); }
   let clean = deduped.join(' ').replace(/\s+/g, ' ').trim();
-  if (clean.length <= DDGS_LIMITS.queryMaxChars) return clean;
+  if (clean.length <= DDGS_SCHEDULING.queryMaxChars) return clean;
   const priority = clean.split(' ').filter((word) => /[A-Z][a-z]|^[A-Z]{2,}$|\d{4}|debt|climate|finance|treaty|vote|resolution|policy|IMF|UN|World|Bank|Paris|Club|Common|Framework|sovereign|development/i.test(word));
   clean = (priority.length >= 4 ? priority : clean.split(' ')).join(' ');
-  while (clean.length > DDGS_LIMITS.queryMaxChars && clean.includes(' ')) clean = clean.replace(/\s+\S+$/, '');
+  while (clean.length > DDGS_SCHEDULING.queryMaxChars && clean.includes(' ')) clean = clean.replace(/\s+\S+$/, '');
   return clean.trim();
-}
-export function alternateQueryForNoResults(query) {
-  const clean = normalizeDdgsQuery(query).replace(/\bbefore\s+\d{4}-\d{2}-\d{2}\b/i, '').replace(/\b(scandal|malpractice|controversy)\b/gi, '').replace(/\s+/g, ' ').trim();
-  return normalizeDdgsQuery(`${clean} official report policy source`);
 }
 
 function contentSignature(result = {}) { return `${result.title || ''} ${result.body || result.snippet || ''}`.toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/[^a-z0-9]+/g, ' ').split(' ').filter((word) => word.length > 4).slice(0, 18).join(' '); }
+function cleanJoin(parts) { return parts.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim(); }
+function targetNames(selectedTargets = []) { return selectedTargets.map((t) => t.name).filter(Boolean); }
 
-export function buildResearchQueries({ form, sliders, selectedTargets = [], targetingMode, poiTypes = [] }) {
-  const base = [form.committee, form.agenda, form.portfolio, form.researchNotes].filter(Boolean).join(' ');
+export function buildResearchQueries({ form, sliders = {}, selectedTargets = [], targetingMode, poiTypes = [] }) {
+  const base = cleanJoin([form.committee, form.agenda, form.portfolio, form.researchNotes]);
   const freeze = form.freezeDate ? `before ${form.freezeDate}` : '';
-  const targets = selectedTargets.length ? selectedTargets.map((t) => t.name).join(' OR ') : 'countries';
-  const controversy = sliders.controversy >= 70 ? ['scandal investigation controversy contradiction', 'implementation failure malpractice accountability', 'voting contradiction treaty commitment'] : ['policy position official statement', 'UN vote treaty commitment'];
-  const aggression = sliders.aggression >= 70 ? ['legal pressure accountability evidence', 'contradiction failure direct question'] : ['policy difference diplomatic position'];
-  const queries = [`${base} ${freeze} official foreign policy doctrine strategic priorities`, `${base} ${freeze} UN resolution voting record treaty commitments`, `${base} ${targets} ${freeze} government statements policy contradiction`, `${base} ${targets} ${freeze} international organization report legal framework`, ...controversy.map((x) => `${base} ${targets} ${freeze} ${x}`), ...aggression.map((x) => `${base} ${targets} ${freeze} ${x}`), `${form.portfolio} foreign policy ${form.agenda} ${freeze}`, `${targets} foreign policy ${form.agenda} ${freeze}`, ...(poiTypes || []).filter((t) => t !== 'AUTO').slice(0, 4).map((type) => `${base} ${targets} ${type} ${freeze}`)];
-  if (form.backgroundGuideName) queries.push(`${base} ${form.backgroundGuideName} background guide ${freeze}`);
-  if (targetingMode !== 'selected_only') queries.push(`${base} automatic target countries relevant controversy ${freeze}`);
-  return [...new Set(queries.map(normalizeDdgsQuery).filter(Boolean))].slice(0, 14);
+  const targets = targetNames(selectedTargets);
+  const targetGroup = targets.length ? targets.join(' OR ') : 'countries';
+  const queryParts = [
+    [base, freeze, 'official foreign policy doctrine strategic priorities'],
+    [base, freeze, 'UN resolution voting record'],
+    [base, freeze, 'treaty commitments legal obligations'],
+    [base, targetGroup, freeze, 'government statements policy contradiction'],
+    [base, targetGroup, freeze, 'international organization report legal framework'],
+    [base, targetGroup, freeze, 'implementation failure accountability'],
+    [base, targetGroup, freeze, 'controversy contradiction investigation'],
+    [base, targetGroup, freeze, 'financial pressure development finance'],
+    [base, targetGroup, freeze, 'sovereign debt restructuring IMF World Bank'],
+    [form.portfolio, 'foreign policy', form.agenda, freeze],
+    [form.portfolio, 'central bank finance ministry', form.agenda, freeze],
+    [targetGroup, 'foreign policy', form.agenda, freeze],
+    [targetGroup, 'minister statement', form.agenda, freeze],
+    [targetGroup, 'historical precedent legal obligation', form.agenda, freeze],
+  ];
+  if (sliders.controversy >= 70) queryParts.push([base, targetGroup, freeze, 'scandal investigation malpractice accountability'], [base, targetGroup, freeze, 'voting contradiction treaty commitment']);
+  if (sliders.aggression >= 70) queryParts.push([base, targetGroup, freeze, 'legal pressure accountability evidence'], [base, targetGroup, freeze, 'contradiction failure direct question']);
+  for (const type of (poiTypes || []).filter((t) => t && t !== 'AUTO').slice(0, 8)) queryParts.push([base, targetGroup, type, freeze]);
+  for (const target of targets.slice(0, 30)) queryParts.push([form.committee, form.agenda, form.portfolio, target, freeze, 'official statement policy'], [form.agenda, target, freeze, 'UN vote treaty implementation controversy'], [form.portfolio, target, form.agenda, freeze, 'financial development diplomatic position']);
+  if (form.backgroundGuideName) queryParts.push([base, form.backgroundGuideName, 'background guide', freeze]);
+  if (targetingMode !== 'selected_only') queryParts.push([base, 'automatic target countries relevant controversy', freeze], [base, 'countries most affected policy dispute', freeze]);
+  return [...new Set(queryParts.map((parts) => normalizeDdgsQuery(cleanJoin(parts))).filter(Boolean))];
+}
+
+function expandResearchQueries({ form, selectedTargets = [], targetingMode, poiTypes = [], round = 0 }) {
+  const base = cleanJoin([form.committee, form.agenda, form.portfolio, form.researchNotes]);
+  const freeze = form.freezeDate ? `before ${form.freezeDate}` : '';
+  const targets = targetNames(selectedTargets);
+  const selectedOrGlobal = targets.length ? targets : ['countries'];
+  const institutions = ['UN resolution', 'voting record', 'treaty', 'government policy', 'foreign ministry statement', 'finance ministry', 'central bank', 'IMF report', 'World Bank report', 'OECD policy', 'development finance', 'sovereign debt restructuring', 'Paris Club', 'G20 Common Framework', 'legal obligation', 'implementation failure', 'accountability', 'controversy', 'contradiction', 'historical precedent'];
+  const queries = [];
+  const offset = round * 5;
+  for (let i = 0; i < Math.min(10, institutions.length); i += 1) {
+    const angle = institutions[(offset + i) % institutions.length];
+    const target = selectedOrGlobal[(round + i) % selectedOrGlobal.length];
+    queries.push(cleanJoin([base, target, angle, `research angle ${round + 1}`, freeze]));
+  }
+  for (const type of (poiTypes || []).filter((t) => t && t !== 'AUTO').slice(round, round + 3)) queries.push(cleanJoin([base, selectedOrGlobal[round % selectedOrGlobal.length], type, 'evidence', freeze]));
+  if (targetingMode !== 'selected_only') queries.push(cleanJoin([form.agenda, form.portfolio, 'emerging current controversy target countries', `research angle ${round + 1}`, freeze]));
+  return queries.map(normalizeDdgsQuery).filter(Boolean);
+}
+
+function shouldSearchNews(query, { form = {}, sliders = {} } = {}) {
+  const hay = `${query} ${form.agenda || ''} ${form.researchNotes || ''}`.toLowerCase();
+  return (sliders.controversy >= 70 && /scandal|investigation|controversy|accountability|failure|malpractice/.test(hay)) || /current|recent|latest|today|news|crisis|war|sanction|election|attack|conflict|ceasefire|vote|announcement|restructuring|statement|reporting/.test(hay);
+}
+function resultCountForQuery(query, sliders = {}, endpoint = '/search/text') {
+  if (endpoint === '/search/news') return sliders.controversy >= 70 ? 8 : 6;
+  return /official|UN|resolution|treaty|IMF|World Bank|sovereign|legal|report/i.test(query) ? 12 : 10;
 }
 
 export function deriveAutomaticTargetCandidates({ form, sources = [], selectedTargets = [] }) {
@@ -100,82 +142,141 @@ export function deriveAutomaticTargetCandidates({ form, sources = [], selectedTa
 }
 
 export async function checkDdgsHealth({ fetchImpl = fetch, baseUrl = DDGS_BASE_URL } = {}) {
-  try { const res = await fetchWithTimeout(`${baseUrl}/health`, { method: 'GET' }, 2500, fetchImpl); return { ok: res.ok, status: res.status, detail: res.ok ? 'DDGS API healthy.' : await res.text().catch(() => '') }; }
+  try { const res = await fetchWithTimeout(`${baseUrl}/health`, { method: 'GET', headers: browserHeaders({ Accept: 'application/json, text/plain, */*' }) }, 2500, fetchImpl); return { ok: res.ok, status: res.status, detail: res.ok ? 'DDGS API healthy.' : await res.text().catch(() => '') }; }
   catch (error) { return { ok: false, status: 0, detail: error?.name === 'AbortError' ? 'DDGS health check timed out.' : `DDGS API unavailable: ${error?.message || error}` }; }
 }
 async function searchEndpointOnce(endpoint, query, maxResults, backend, { fetchImpl = fetch, baseUrl = DDGS_BASE_URL } = {}) {
   try {
-    const res = await fetchWithTimeout(`${baseUrl}${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, region: 'us-en', safesearch: 'moderate', max_results: maxResults, backend }) }, DDGS_LIMITS.timeoutMs, fetchImpl);
-    if (!res.ok) { const body = await res.text().catch(() => ''); const status = classifySearchFailure({ status: res.status, body }); return { ok: false, status, httpStatus: res.status, body, backend, query, results: [] }; }
+    const res = await fetchWithTimeout(`${baseUrl}${endpoint}`, { method: 'POST', headers: browserHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ query, region: 'us-en', safesearch: 'moderate', max_results: maxResults, backend }) }, 9000, fetchImpl);
+    if (!res.ok) { const body = await res.text().catch(() => ''); return { ok: false, status: classifySearchFailure({ status: res.status, body }), httpStatus: res.status, body, backend, query, endpoint, results: [] }; }
     const payload = await res.json(); const results = Array.isArray(payload.results) ? payload.results : Array.isArray(payload) ? payload : [];
-    return { ok: true, status: results.length ? SEARCH_STATUS.SUCCESS : SEARCH_STATUS.NO_RESULTS_FOR_QUERY, httpStatus: 200, backend, query, results };
-  } catch (error) { return { ok: false, status: classifySearchFailure({ error }), httpStatus: 0, backend, query, error, results: [] }; }
+    return { ok: true, status: results.length ? SEARCH_STATUS.SUCCESS : SEARCH_STATUS.TRUE_EMPTY_RESULT, httpStatus: 200, backend, query, endpoint, results };
+  } catch (error) { return { ok: false, status: classifySearchFailure({ error }), httpStatus: 0, backend, query, endpoint, error, results: [] }; }
 }
 async function searchTextOnce(query, maxResults, backend, options = {}) { return searchEndpointOnce('/search/text', query, maxResults, backend, options); }
 async function searchNewsOnce(query, maxResults, backend, options = {}) { return searchEndpointOnce('/search/news', query, maxResults, backend, options); }
-export function alternateQueries(query) {
-  const alternate = alternateQueryForNoResults(query);
-  const normalized = normalizeDdgsQuery(query);
-  return alternate && alternate !== normalized ? [alternate] : [];
-}
-export async function searchWithBackendFallback(query, maxResults = 10, { fetchImpl = fetch, baseUrl = DDGS_BASE_URL, onAttempt, endpoint = '/search/text' } = {}) {
+function normalDelayForEndpoint(endpoint, rng) { return endpoint === '/search/news' ? randomDelay(DDGS_SEARCH_DELAY.newsMinMs, DDGS_SEARCH_DELAY.newsMaxMs, rng) : randomDelay(DDGS_SEARCH_DELAY.textMinMs, DDGS_SEARCH_DELAY.textMaxMs, rng); }
+function retryDelayForAttempt(attemptIndex, rng) { const base = DDGS_RETRY_DELAYS[Math.min(attemptIndex, DDGS_RETRY_DELAYS.length - 1)]; return base + randomDelay(0, Math.min(base, 8000), rng); }
+
+export async function searchWithBackendFallback(query, maxResults = 10, { fetchImpl = fetch, baseUrl = DDGS_BASE_URL, onAttempt, endpoint = '/search/text', delayFn = defaultDelay, rng = Math.random, pace = true } = {}) {
   const attempts = [];
   const backend = DDGS_TEXT_BACKEND;
   const normalized = normalizeDdgsQuery(query);
-  const intentQueries = [...new Set([normalized, ...alternateQueries(normalized)].filter(Boolean))].slice(0, 2);
-  for (let queryIndex = 0; queryIndex < intentQueries.length; queryIndex += 1) {
-    const intentQuery = intentQueries[queryIndex];
-    const maxAttempts = queryIndex === 0 ? DDGS_LIMITS.retries : 0;
-    for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
-      if (attempt) await sleep(jitter(DDGS_LIMITS.backoffBaseMs * (2 ** (attempt - 1))));
-      const result = endpoint === '/search/news' ? await searchNewsOnce(intentQuery, maxResults, backend, { fetchImpl, baseUrl }) : await searchTextOnce(intentQuery, maxResults, backend, { fetchImpl, baseUrl });
-      attempts.push({ query: intentQuery, backend, status: result.status, httpStatus: result.httpStatus }); onAttempt?.(attempts.at(-1));
-      if (result.results.length) return { ...result, attempts };
-      if (result.status === SEARCH_STATUS.NO_RESULTS_FOR_QUERY) break;
-      if (!shouldRetrySearch(result.status)) break;
-    }
+  let lastResult = null;
+  for (let attempt = 0; attempt <= DDGS_RETRY_DELAYS.length; attempt += 1) {
+    const result = endpoint === '/search/news' ? await searchNewsOnce(normalized, maxResults, backend, { fetchImpl, baseUrl }) : await searchTextOnce(normalized, maxResults, backend, { fetchImpl, baseUrl });
+    lastResult = result;
+    const attemptRecord = { query: normalized, backend, status: result.status, httpStatus: result.httpStatus, endpoint, attempt: attempt + 1 };
+    attempts.push(attemptRecord); onAttempt?.(attemptRecord);
+    if (result.results.length || !isTransientSearchStatus(result.status) || attempt === DDGS_RETRY_DELAYS.length) break;
+    if (pace) await delayFn(retryDelayForAttempt(attempt, rng), { kind: 'backoff', endpoint, query: normalized, attempt: attempt + 1, status: result.status });
   }
-  return { ok: false, status: attempts.at(-1)?.status || SEARCH_STATUS.SEARCH_FAILED, query: normalized, backend, results: [], attempts };
+  if (pace) await delayFn(normalDelayForEndpoint(endpoint, rng), { kind: 'search-pace', endpoint, query: normalized, status: lastResult?.status });
+  return { ok: Boolean(lastResult?.results?.length), status: lastResult?.status || SEARCH_STATUS.SEARCH_FAILED, query: normalized, backend, endpoint, results: lastResult?.results || [], attempts };
 }
+
 async function extractOnce(source, { fetchImpl = fetch, baseUrl = DDGS_BASE_URL } = {}) {
   try {
-    const res = await fetchWithTimeout(`${baseUrl}/extract`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: source.url, fmt: 'text_plain' }) }, DDGS_LIMITS.timeoutMs, fetchImpl);
-    if (!res.ok) { const body = await res.text().catch(() => ''); return { ...source, extractedText: '', extractionStatus: classifyExtractionFailure({ status: res.status, body }), extractionHttpStatus: res.status, retrievedAt: new Date().toISOString() }; }
+    const res = await fetchWithTimeout(`${baseUrl}/extract`, { method: 'POST', headers: browserHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ url: source.url, fmt: 'text_plain' }) }, 9000, fetchImpl);
+    if (!res.ok) { const body = await res.text().catch(() => ''); return { ...source, extractedText: '', extractionStatus: classifyExtractionFailure({ status: res.status, body }), extractionHttpStatus: res.status, retrievalStatus: EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED, retrievedAt: new Date().toISOString() }; }
     const payload = await res.json(); const extractedText = String(payload.content || '').slice(0, 2200);
-    return { ...source, extractedText, extractionStatus: extractedText ? EXTRACTION_STATUS.RETRIEVED : EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED, extractionHttpStatus: 200, retrievedAt: new Date().toISOString() };
-  } catch (error) { return { ...source, extractedText: '', extractionStatus: classifyExtractionFailure({ error }), extractionHttpStatus: 0, retrievedAt: new Date().toISOString() }; }
+    const status = extractedText ? EXTRACTION_STATUS.RETRIEVED : EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED;
+    return { ...source, extractedText, extractionStatus: status, extractionHttpStatus: 200, retrievalStatus: status, retrievedAt: new Date().toISOString() };
+  } catch (error) { const status = classifyExtractionFailure({ error }); return { ...source, extractedText: '', extractionStatus: status, extractionHttpStatus: 0, retrievalStatus: status, retrievedAt: new Date().toISOString() }; }
 }
-export async function extractSource(source, options = {}) {
-  const first = await extractOnce(source, options);
-  if (!shouldRetryExtract(first.extractionStatus) || first.extractionStatus === EXTRACTION_STATUS.DISCOVERED_DIRECT_EXTRACTION_BLOCKED) return first;
-  await sleep(jitter(DDGS_LIMITS.backoffBaseMs));
-  return extractOnce(source, options);
-}
-async function mapLimit(items, limit, fn) { const out = new Array(items.length); let next = 0; const workers = Array.from({ length: Math.min(limit, items.length) }, async () => { while (next < items.length) { const index = next; next += 1; out[index] = await fn(items[index], index); } }); await Promise.all(workers); return out; }
-function sourceFromResult(result, query, backend) { const url = canonicalUrl(result.href || result.url || result.link); const domain = domainFromResult(url); return { sourceId: `ddgs:${backend}:${url}`, url, canonicalUrl: url, title: result.title || 'Untitled source', snippet: result.body || result.snippet || '', publicationDate: result.date || result.published || '', domain, query, ddgsQuery: query, searchBackend: backend, bangUrl: bangUrl(domain, query), discoveryStatus: EXTRACTION_STATUS.DISCOVERED, extractionStatus: EXTRACTION_STATUS.DISCOVERED, retrievalStatus: EXTRACTION_STATUS.DISCOVERED, retrievedAt: new Date().toISOString() }; }
+export async function extractSource(source, options = {}) { return extractOnce(source, options); }
 
-export async function discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount = 20, recoveryFocus = '', onProgress }) {
-  const health = await checkDdgsHealth();
-  const queries = buildResearchQueries({ form, sliders, selectedTargets, targetingMode, poiTypes });
-  if (!health.ok) return { schema: 'DDGS API /search/text + /extract (OpenAPI 3.1.0)', health, queries, sources: [], retrievedSources: [], bangUrls: [], automaticTargetCandidates: [], failures: [{ status: 'DDGS_API_UNAVAILABLE', detail: health.detail }], stats: { queryCount: queries.length, discoveredUrls: 0, retainedUrls: 0, retrievedSources: 0, bangUrls: 0, hardMax: 0, softMax: 0, preferredRange: '0-0', adaptiveCeiling: 0, absoluteSafetyCeiling: DDGS_LIMITS.absoluteSafetyCeiling } };
-  const budget = planResearchBudget({ poiCount, selectedTargets, sliders, form, coverageGaps: recoveryFocus ? 2 : 0 });
-  const byUrl = new Map(); const contentSignatures = new Set(); const failures = []; let staleRounds = 0;
-  for (const query of queries) {
-    if (byUrl.size >= budget.softMax && staleRounds >= 2) break;
-    onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `DDGS URL discovery: ${byUrl.size}/${budget.softMax} retained.`, done: byUrl.size, total: budget.softMax });
-    const before = byUrl.size;
-    const searches = [
-      await searchWithBackendFallback(query, sliders.controversy >= 70 ? 12 : 8, { onAttempt: (attempt) => { if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, endpoint: '/search/text', recoverable: true }); } }),
-      await searchWithBackendFallback(query, 4, { endpoint: '/search/news', onAttempt: (attempt) => { if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, endpoint: '/search/news', recoverable: true }); } }),
-    ];
-    searches.flatMap((search) => search.results.map((result) => ({ result, search }))).forEach(({ result, search }) => { if (byUrl.size >= budget.hardMax) return; const source = sourceFromResult(result, search.query, search.backend); const signature = contentSignature(result); if (!source.url || byUrl.has(source.url) || (signature && contentSignatures.has(signature)) || /wikipedia\.org/i.test(source.url)) return; if (signature) contentSignatures.add(signature); byUrl.set(source.url, source); });
-    staleRounds = byUrl.size - before < 3 ? staleRounds + 1 : 0; await sleep(DDGS_LIMITS.searchPaceMs);
-    if (byUrl.size >= budget.preferredMin && staleRounds >= 2) break;
+function sourceFromResult(result, query, backend, endpoint = '/search/text') {
+  const url = canonicalUrl(result.href || result.url || result.link);
+  const domain = domainFromResult(url);
+  const publicationDate = result.date || result.published || '';
+  return { sourceId: `ddgs:${backend}:${url}`, url, canonicalUrl: url, title: result.title || 'Untitled source', snippet: result.body || result.snippet || '', publicationDate, domain, query, ddgsQuery: query, backend, searchBackend: backend, searchEndpoint: endpoint, date: endpoint === '/search/news' ? result.date || '' : publicationDate, source: endpoint === '/search/news' ? result.source || '' : undefined, image: endpoint === '/search/news' ? result.image || null : undefined, bangUrl: bangUrl(domain, query), discoveryStatus: EXTRACTION_STATUS.DISCOVERED, extractionStatus: EXTRACTION_STATUS.DISCOVERED, retrievalStatus: EXTRACTION_STATUS.DISCOVERED, retrievedAt: new Date().toISOString() };
+}
+function retainResults({ results, search, endpoint, byUrl, contentSignatures, stats }) {
+  let added = 0;
+  for (const result of results) {
+    if (byUrl.size >= DDGS_LIMITS.hardMax) break;
+    const source = sourceFromResult(result, search.query, search.backend, endpoint);
+    const signature = contentSignature(result);
+    if (!source.url || /wikipedia\.org/i.test(source.url)) { stats.filteredUrls += 1; continue; }
+    if (byUrl.has(source.url) || (signature && contentSignatures.has(signature))) { stats.deduplicatedUrls += 1; continue; }
+    if (signature) contentSignatures.add(signature);
+    byUrl.set(source.url, source); added += 1; stats.uniqueUrlsDiscovered = byUrl.size;
   }
-  const sources = [...byUrl.values()].slice(0, budget.hardMax);
-  const extractionCandidates = sources.slice(0, Math.min(budget.extractMax, sources.length));
-  const retrieved = await mapLimit(extractionCandidates, DDGS_LIMITS.extractConcurrency, async (source) => { const extracted = await extractSource(source); await sleep(DDGS_LIMITS.extractPaceMs); return extracted; });
-  const merged = sources.map((source) => retrieved.find((r) => r.url === source.url) || source);
+  return added;
+}
+function batchSizeForUrlCount(count) { if (count < 60) return 10; if (count < 100) return 8; if (count < 130) return 6; if (count < 160) return 4; return 0; }
+function shouldStopAfterBatch({ retained, targetUrls, batchYield, staleBatches, queryPoolExhausted, throttleExhausted }) {
+  if (retained >= DDGS_LIMITS.hardMax || throttleExhausted) return true;
+  if (retained < Math.min(DDGS_LIMITS.preferredMin, targetUrls)) return queryPoolExhausted && staleBatches >= 4;
+  if (retained >= targetUrls && staleBatches >= 2) return true;
+  if (retained >= DDGS_LIMITS.preferredMax && batchYield <= 2) return true;
+  if (retained >= DDGS_LIMITS.softMax && batchYield <= 4) return true;
+  return queryPoolExhausted && staleBatches >= 5;
+}
+
+export async function discoverResearch({ form, sliders = {}, selectedTargets, targetingMode, poiTypes, poiCount = 20, recoveryFocus = '', onProgress, fetchImpl = fetch, baseUrl = DDGS_BASE_URL, delayFn = defaultDelay, rng = Math.random, skipHealthCheck = false } = {}) {
+  const health = skipHealthCheck ? { ok: true, status: 200, detail: 'DDGS health check skipped by test harness.' } : await checkDdgsHealth({ fetchImpl, baseUrl });
+  const budget = planResearchBudget({ poiCount });
+  const initialQueries = buildResearchQueries({ form, sliders, selectedTargets, targetingMode, poiTypes });
+  if (!health.ok) return { schema: 'DDGS API /search/text + /search/news + /extract (OpenAPI 3.1.0)', health, queries: initialQueries, sources: [], retrievedSources: [], bangUrls: [], automaticTargetCandidates: [], failures: [{ status: 'DDGS_API_UNAVAILABLE', detail: health.detail, category: 'ddgs-research-failure' }], stats: { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, queryCount: initialQueries.length, discoveredUrls: 0, retainedUrls: 0, deduplicatedUrls: 0, textSearches: 0, newsSearches: 0, retrievedSources: 0, extractionFailed: 0, hardMax: budget.hardMax, softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, targetUrls: budget.targetUrls, degraded: true } };
+
+  const byUrl = new Map(); const contentSignatures = new Set(); const failures = []; const searched = new Set(); const queryQueue = [...initialQueries];
+  const stats = { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, deduplicatedUrls: 0, filteredUrls: 0, textSearches: 0, newsSearches: 0, extractionCompleted: 0, extractionFailed: 0, retryBackoffs: 0, throttleBackoffs: 0 };
+  let expansionRound = 0; let staleBatches = 0; let throttleFailures = 0; let throttleExhausted = false;
+
+  while (byUrl.size < DDGS_LIMITS.hardMax) {
+    const requestedBatchSize = batchSizeForUrlCount(byUrl.size) || DDGS_BATCH_SIZES[Math.min(expansionRound, DDGS_BATCH_SIZES.length - 1)] || 4;
+    while (queryQueue.filter((q) => !searched.has(q)).length < requestedBatchSize && expansionRound < 40) {
+      for (const q of expandResearchQueries({ form: { ...form, researchNotes: cleanJoin([form.researchNotes, recoveryFocus]) }, selectedTargets, targetingMode, poiTypes, round: expansionRound })) {
+        if (!queryQueue.includes(q)) queryQueue.push(q); else stats.duplicateQueries += 1;
+      }
+      expansionRound += 1;
+    }
+    const batch = [];
+    while (batch.length < requestedBatchSize && queryQueue.length) {
+      const query = queryQueue.shift();
+      if (!query || searched.has(query)) { stats.duplicateQueries += 1; continue; }
+      searched.add(query); batch.push(query);
+    }
+    if (!batch.length) break;
+    const beforeBatch = byUrl.size;
+    for (const query of batch) {
+      if (byUrl.size >= DDGS_LIMITS.hardMax || throttleExhausted) break;
+      onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `${byUrl.size}/${DDGS_LIMITS.hardMax} unique sources · ${stats.searchedQueries} queries · ${stats.successfulQueries} successful · ${stats.failedQueries} failed · Text ${stats.textSearches} · News ${stats.newsSearches} · Dedup ${stats.deduplicatedUrls}`, done: byUrl.size, total: DDGS_LIMITS.hardMax });
+      const textSearch = await searchWithBackendFallback(query, resultCountForQuery(query, sliders, '/search/text'), { fetchImpl, baseUrl, delayFn, rng, endpoint: '/search/text', onAttempt: (attempt) => { if (attempt.attempt > 1) stats.retryBackoffs += 1; if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, recoverable: isTransientSearchStatus(attempt.status), category: 'ddgs-research-failure' }); } });
+      stats.searchedQueries += 1; stats.textSearches += 1;
+      if (textSearch.results.length) stats.successfulQueries += 1; else stats.failedQueries += 1;
+      retainResults({ results: textSearch.results, search: textSearch, endpoint: '/search/text', byUrl, contentSignatures, stats });
+      if (isThrottleStatus(textSearch.status)) { throttleFailures += 1; stats.throttleBackoffs += 1; } else if (textSearch.results.length) throttleFailures = 0;
+      if (throttleFailures >= 3) { throttleExhausted = true; break; }
+      if (byUrl.size >= DDGS_LIMITS.hardMax) break;
+      if (shouldSearchNews(query, { form, sliders })) {
+        const newsSearch = await searchWithBackendFallback(query, resultCountForQuery(query, sliders, '/search/news'), { fetchImpl, baseUrl, delayFn, rng, endpoint: '/search/news', onAttempt: (attempt) => { if (attempt.attempt > 1) stats.retryBackoffs += 1; if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, recoverable: isTransientSearchStatus(attempt.status), category: 'ddgs-research-failure' }); } });
+        stats.searchedQueries += 1; stats.newsSearches += 1;
+        if (newsSearch.results.length) stats.successfulQueries += 1; else stats.failedQueries += 1;
+        retainResults({ results: newsSearch.results, search: newsSearch, endpoint: '/search/news', byUrl, contentSignatures, stats });
+        if (isThrottleStatus(newsSearch.status)) { throttleFailures += 1; stats.throttleBackoffs += 1; } else if (newsSearch.results.length) throttleFailures = 0;
+        if (throttleFailures >= 3) { throttleExhausted = true; break; }
+      }
+    }
+    const batchYield = byUrl.size - beforeBatch;
+    staleBatches = batchYield <= (byUrl.size < DDGS_LIMITS.preferredMin ? 2 : 4) ? staleBatches + 1 : 0;
+    const queryPoolExhausted = !queryQueue.some((q) => !searched.has(q)) && expansionRound >= 40;
+    if (shouldStopAfterBatch({ retained: byUrl.size, targetUrls: budget.targetUrls, batchYield, staleBatches, queryPoolExhausted, throttleExhausted })) break;
+  }
+
+  const sources = [...byUrl.values()].slice(0, DDGS_LIMITS.hardMax);
+  const retrieved = [];
+  for (const source of sources.slice(0, Math.min(budget.extractMax, sources.length))) {
+    const extracted = await extractSource(source, { fetchImpl, baseUrl });
+    retrieved.push(extracted);
+    if (extracted.extractionStatus === EXTRACTION_STATUS.RETRIEVED) stats.extractionCompleted += 1; else stats.extractionFailed += 1;
+    await delayFn(randomDelay(DDGS_SEARCH_DELAY.extractMinMs, DDGS_SEARCH_DELAY.extractMaxMs, rng), { kind: 'extract-pace', url: source.url });
+  }
+  const retrievedByUrl = new Map(retrieved.map((source) => [source.url, source]));
+  const merged = sources.map((source) => retrievedByUrl.get(source.url) || source);
   const automaticTargetCandidates = deriveAutomaticTargetCandidates({ form, sources: merged, selectedTargets });
-  return { schema: 'DDGS API /search/text + /extract (OpenAPI 3.1.0)', health, queries, sources: merged, retrievedSources: retrieved, bangUrls: merged.map((s) => s.bangUrl).filter(Boolean), automaticTargetCandidates, failures, stats: { queryCount: queries.length, discoveredUrls: byUrl.size, retainedUrls: merged.length, retrievedSources: retrieved.filter((s) => s.extractedText).length, extractionBlocked: retrieved.filter((s) => s.extractionStatus === EXTRACTION_STATUS.DISCOVERED_DIRECT_EXTRACTION_BLOCKED).length, bangUrls: merged.filter((s) => s.bangUrl).length, hardMax: budget.hardMax, softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, adaptiveCeiling: budget.hardMax, absoluteSafetyCeiling: budget.absoluteSafetyCeiling } };
+  const searchedQueries = [...searched];
+  return { schema: 'DDGS API /search/text + /search/news + /extract (OpenAPI 3.1.0)', health, queries: searchedQueries, plannedQueries: [...new Set([...searchedQueries, ...queryQueue])], sources: merged, retrievedSources: retrieved, bangUrls: merged.map((s) => s.bangUrl).filter(Boolean), automaticTargetCandidates, failures, stats: { ...stats, queryCount: searchedQueries.length, discoveredUrls: byUrl.size, retainedUrls: merged.length, retrievedSources: retrieved.filter((s) => s.extractedText).length, bangUrls: merged.filter((s) => s.bangUrl).length, hardMax: budget.hardMax, softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, targetUrls: budget.targetUrls, degraded: throttleExhausted || merged.length < DDGS_LIMITS.preferredMin, throttleExhausted, uniqueUrlsDiscovered: byUrl.size } };
 }

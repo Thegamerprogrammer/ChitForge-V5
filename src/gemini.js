@@ -18,6 +18,7 @@ const cacheKey = (apiKey) => redact(apiKey);
 
 function userMessageForStatus(status, reason) {
   if (status === 400 && /api[_ ]?key|key not valid|API_KEY_INVALID/i.test(reason || '')) return 'Your Gemini API key was rejected. Check the key and API access.';
+  if (status === 400 && /Interactions API/i.test(reason || '')) return 'The selected Gemini model requires the Interactions API and is not compatible with this generation path.';
   if (status === 401) return 'Invalid Gemini API key.';
   if (status === 403) return 'API access denied for this Gemini key.';
   if (status === 404) return 'The selected Gemini model is unavailable.';
@@ -57,7 +58,7 @@ async function rawGenerate(apiKey, model, prompt, schema, { timeoutMs = 70000, n
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(endpoint(apiKey, model.id), { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }, signal: controller.signal, body: JSON.stringify(buildBody(prompt, schema, model, { nativeJson, attachments })) });
-    if (!res.ok) { const reason = await parseErrorResponse(res); const category = (res.status === 401 || res.status === 403 || /api[_ ]?key|key not valid|API_KEY_INVALID/i.test(reason)) ? 'invalid-api-key' : res.status === 404 ? 'model-unavailable' : [429, 500, 503].includes(res.status) ? 'transient-model-failure' : `http-${res.status}`; throw new GeminiError(userMessageForStatus(res.status, reason), { category, status: res.status, reason, model: model.displayName }); }
+    if (!res.ok) { const reason = await parseErrorResponse(res); const category = (res.status === 401 || res.status === 403 || /api[_ ]?key|key not valid|API_KEY_INVALID/i.test(reason)) ? 'invalid-api-key' : (res.status === 404 || (res.status === 400 && /Interactions API/i.test(reason))) ? 'model-unavailable' : [429, 500, 503].includes(res.status) ? 'transient-model-failure' : `http-${res.status}`; throw new GeminiError(userMessageForStatus(res.status, reason), { category, status: res.status, reason, model: model.displayName }); }
     const data = await res.json();
     if (data.promptFeedback?.blockReason) throw new GeminiError(`Gemini blocked the request for safety reasons: ${data.promptFeedback.blockReason}.`, { category: 'safety-filter', reason: data.promptFeedback.blockReason, model: model.displayName });
     const text = extractGeminiText(data).trim();
