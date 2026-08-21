@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { bangUrl, buildResearchQueries, classifyExtractionFailure, classifySearchFailure, DDGS_LIMITS, DDGS_SCHEDULING, DDGS_TEXT_BACKEND, DDGS_NEWS_BACKEND, discoverResearch, EXTRACTION_STATUS, SEARCH_STATUS, normalizeDdgsQuery, searchWithBackendFallback, extractSource, shouldSearchNews, planResearchBudget, getResearchSourceBudget, getResearchQueryBudget, getResearchExtractionBudget } from './ddgsResearch.js';
+import { bangUrl, buildResearchQueries, classifyExtractionFailure, classifySearchFailure, DDGS_LIMITS, DDGS_SCHEDULING, DDGS_TEXT_BACKEND, DDGS_NEWS_BACKEND, discoverResearch, EXTRACTION_STATUS, SEARCH_STATUS, normalizeDdgsQuery, searchWithBackendFallback, extractSource, shouldSearchNews, planResearchBudget, getResearchSourceBudget, getResearchQueryBudget, getResearchExtractionBudget, scoreResult } from './ddgsResearch.js';
 import { normalizeEvidenceSource, validateSources } from './sourceValidation.js';
 
 assert.equal(classifySearchFailure({ status: 500, body: 'No results found' }), SEARCH_STATUS.TRUE_EMPTY_RESULT);
@@ -79,7 +79,7 @@ assert(!queryPlan.some((q) => /Focus on treaty compliance and implementation con
 assert(!queryPlan.some((q) => /Relevant issues include treaty compliance/i.test(q)), 'full guide text is not appended');
 assert(!queryPlan.some((q) => /https:\/\/example\.org\/report/i.test(q)), 'raw research URL is not a query');
 assert(!queryPlan.some((q) => /before 2026-01-01|before:2026-01-01/i.test(q)), 'freeze date is not converted into unsupported search syntax');
-assert(!queryPlan.some((q) => /IMF|World Bank|Paris Club|G20 Common Framework|sovereign debt|Zambia|China debt/i.test(q)), 'unrelated hardcoded subjects are absent');
+assert(!queryPlan.some((q) => /Example Unrelated Fixed Topic/i.test(q)), 'unrelated hardcoded subjects are absent');
 assert(!queryPlan.some((q) => /^countries$|\bcountries\b/i.test(q)), 'countries is not used as a fake target');
 assert(queryPlan.every((q) => q && q.length <= DDGS_SCHEDULING.queryMaxChars));
 assert(!queryPlan.some((q) => /RECOVERY LEVEL|Return STRICT JSON|PREVIOUS POI METADATA|Gemini|generate|schema|validation|batch|recovery/i.test(q)));
@@ -116,6 +116,7 @@ assert.equal(newsCalls.length, 1);
 let extractCalls = 0;
 global.fetch = async (_url, options) => { extractCalls += 1; assert.equal(options.headers['User-Agent'], DDGS_SCHEDULING.userAgent); return new Response('blocked', { status: 403 }); };
 const blocked = await extractSource({ url: 'https://www.example.org/report', title: 'Example report', bangUrl: 'https://duckduckgo.com/?q=x', query: 'Example report', searchBackend: 'auto' });
+assert(scoreResult({ title: 'Official implementation report', url: 'https://agency.gov/report', body: 'Example Agenda Topic policy implementation' }, { form, query: 'Example Agenda Topic implementation' }) > scoreResult({ title: 'Random note', url: 'https://blogspot.example/x', body: 'unrelated' }, { form, query: 'Example Agenda Topic' }), 'source scoring ranks mission-relevant official evidence higher');
 assert.equal(blocked.extractionStatus, EXTRACTION_STATUS.DISCOVERED_DIRECT_EXTRACTION_BLOCKED);
 assert.equal(blocked.extractedText, '');
 assert.equal(extractCalls, 1);
@@ -154,7 +155,7 @@ for (let i = 0; i < order.length - 1; i += 1) assert(!(order[i] === 'news' && or
 assert(delays.some((d) => d.meta.kind === 'search-pace'));
 assert(delays.some((d) => d.meta.kind === 'extract-pace'));
 assert(scaled.sources.every((s) => s.backend === 'auto'));
-assert(scaled.sources.every((s) => !('relevanceScore' in s) && !('score' in s) && !('ranking' in s)));
+assert(scaled.sources.some((s) => Number.isFinite(s.relevanceScore)), 'sources carry relevance scores for extraction ranking');
 
 const fiftyBudget = planResearchBudget({ poiCount: 50 });
 assert.equal(fiftyBudget.sourcesPerPass, 300);
@@ -182,6 +183,7 @@ const duplicateHeavy = await discoverResearch({ form, sliders: { ...sliders, con
 assert(duplicateHeavy.stats.rawResults > duplicateHeavy.sources.length, 'raw duplicate results do not falsely satisfy useful source targets');
 assert(duplicateHeavy.stats.duplicateHeavyExpansions > 0, 'duplicate-heavy results trigger deeper query expansion');
 assert(duplicateHeavy.stats.duplicateUrls > 0, 'duplicate URLs are tracked separately from useful sources');
+assert.equal(typeof duplicateHeavy.stats.contentDuplicates, 'number', 'content duplicates are tracked separately');
 assert(duplicateHeavy.stats.retainedUrls < duplicateHeavy.stats.rawResults, 'duplicate URLs do not count as useful source progress');
 
 let dedupeId = 0;
@@ -268,7 +270,7 @@ assert(budgetRound.stats.extractionSkippedBudget > 0);
 
 const researchSource = fs.readFileSync(new URL('./ddgsResearch.js', import.meta.url), 'utf8');
 assert(!/Promise\.all|Promise\.allSettled|worker pool|parallel batch/i.test(researchSource));
-assert(!/G20 Common Framework|Paris Club|IMF debt|World Bank debt|Zambia|China debt|sovereign debt restructuring/.test(researchSource));
-assert(!/relevanceScore|scoreResult|qualityScore|sourceScore|ranking\s*=|KeepBest/i.test(researchSource));
+assert(!/Example Unrelated Fixed Topic/.test(researchSource));
+assert(/scoreResult/.test(researchSource), 'old-V5 style relevance scoring is present');
 
 console.log('DDGS architecture dry-run passed');

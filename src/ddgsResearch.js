@@ -180,12 +180,24 @@ function resultCountForQuery(query, sliders = {}, endpoint = '/search/text') {
 }
 
 export function deriveAutomaticTargetCandidates({ form, sources = [], selectedTargets = [] }) {
-  const portfolio = String(form.portfolio || '').toLowerCase(); const manual = new Set((selectedTargets || []).map((t) => t.iso || t.name)); const mentions = new Map();
-  const countryHints = [['RUS', 'Russia'], ['CHN', 'China'], ['USA', 'United States'], ['ISR', 'Israel'], ['IRN', 'Iran'], ['SAU', 'Saudi Arabia'], ['TUR', 'Türkiye'], ['IND', 'India'], ['PAK', 'Pakistan'], ['FRA', 'France'], ['GBR', 'United Kingdom'], ['DEU', 'Germany'], ['JPN', 'Japan'], ['BRA', 'Brazil'], ['ZAF', 'South Africa'], ['EGY', 'Egypt'], ['ETH', 'Ethiopia'], ['IDN', 'Indonesia'], ['UKR', 'Ukraine'], ['MEX', 'Mexico'], ['ARE', 'United Arab Emirates'], ['QAT', 'Qatar'], ['KWT', 'Kuwait'], ['BHR', 'Bahrain'], ['SGP', 'Singapore']];
-  const context = [form.committee, form.agenda, form.researchNotes, form.backgroundGuideName, form.backgroundGuide?.text || form.backgroundGuideText, ...sources.map((s) => `${s.title} ${s.snippet} ${s.domain}`)].join(' ').toLowerCase();
-  for (const [iso, name] of countryHints) { const key = name.toLowerCase(); if (manual.has(iso) || key === portfolio || iso.toLowerCase() === portfolio) continue; const count = (context.match(new RegExp(`\\b${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g')) || []).length; if (count) mentions.set(iso, { iso, name, score: count, reason: `Mentioned in agenda/background/research context ${count} time(s) and not the portfolio country.` }); }
-  return [...mentions.values()].sort((a, b) => b.score - a.score).slice(0, 8);
+  const portfolio = String(form.portfolio || '').toLowerCase();
+  const manual = new Set((selectedTargets || []).flatMap((t) => [String(t.iso || '').toLowerCase(), String(t.name || '').toLowerCase()]).filter(Boolean));
+  const text = [form.committee, form.agenda, form.researchNotes, form.backgroundGuideName, form.backgroundGuide?.text || form.backgroundGuideText, ...sources.map((source) => `${source.title || ''} ${source.snippet || ''} ${source.domain || ''}`)].join('\n');
+  const ignored = /^(The|And|For|With|From|This|That|These|Those|Committee|Agenda|Background|Guide|Official|Policy|Report|Statement|Implementation|International|United Nations|Security Council)$/;
+  const mentions = new Map();
+  const rx = /\b([A-Z][\p{L}.'-]+(?:\s+(?:of|and|the|[A-Z][\p{L}.'-]+)){0,4})\b/gu;
+  for (const match of text.matchAll(rx)) {
+    const name = match[1].replace(/\s+/g, ' ').trim();
+    const key = name.toLowerCase();
+    if (name.length < 4 || ignored.test(name) || key === portfolio || manual.has(key) || /^(un|usa|uk|eu)$/i.test(name)) continue;
+    const current = mentions.get(key) || { iso: `AUTO-${mentions.size + 1}`, name, score: 0, reason: 'Mentioned in agenda/background/research context and not the portfolio.' };
+    current.score += 1;
+    current.reason = `Mentioned in agenda/background/research context ${current.score} time(s) and not the portfolio.`;
+    mentions.set(key, current);
+  }
+  return [...mentions.values()].sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).slice(0, 8);
 }
+
 
 export async function checkDdgsHealth({ fetchImpl = fetch, baseUrl = DDGS_BASE_URL } = {}) {
   try { const res = await fetchWithTimeout(`${baseUrl}/health`, { method: 'GET', headers: browserHeaders({ Accept: 'application/json, text/plain, */*' }) }, 2500, fetchImpl); return { ok: res.ok, status: res.status, detail: res.ok ? 'DDGS API healthy.' : await res.text().catch(() => '') }; }
@@ -263,20 +275,40 @@ function sourceFromResult(result, query, backend, endpoint = '/search/text') {
   const publicationDate = result.date || result.published || '';
   return { sourceId: `ddgs:${backend}:${url}`, url, canonicalUrl: url, title: result.title || 'Untitled source', snippet: result.body || result.snippet || '', publicationDate, domain, query, ddgsQuery: query, backend, searchBackend: backend, searchEndpoint: endpoint, date: endpoint === '/search/news' ? result.date || '' : publicationDate, sourceType: endpoint === '/search/news' ? 'news' : 'text', source: endpoint === '/search/news' ? result.source || '' : undefined, image: endpoint === '/search/news' ? result.image || null : undefined, bangUrl: bangUrl(domain, query), discoveryStatus: EXTRACTION_STATUS.DISCOVERED, extractionStatus: EXTRACTION_STATUS.DISCOVERED, retrievalStatus: EXTRACTION_STATUS.DISCOVERED, retrievedAt: new Date().toISOString() };
 }
+
+function missionTerms({ form = {}, selectedTargets = [], poiTypes = [] } = {}) {
+  return [form.committee, form.agenda, form.portfolio, form.researchNotes, form.backgroundGuideName, form.backgroundGuideText || form.backgroundGuide?.text, ...(selectedTargets || []).map((t) => t.name), ...(poiTypes || [])]
+    .flatMap((value) => extractCompactTerms(value, 8))
+    .map((term) => term.toLowerCase());
+}
+
+export function scoreResult(result = {}, { form = {}, selectedTargets = [], poiTypes = [], query = '', endpoint = '/search/text' } = {}) {
+  const hay = `${result.title || ''} ${result.snippet || result.body || ''} ${result.domain || domainFromResult(result.url || result.href || '')} ${query}`.toLowerCase();
+  let score = 0;
+  for (const term of missionTerms({ form, selectedTargets, poiTypes })) if (term && hay.includes(term)) score += 3;
+  const domain = domainFromResult(result.url || result.href || result.link || '') || String(result.domain || '').toLowerCase();
+  if (/\.(gov|int|edu)(?:\.|$)|(^|\.)un\.org$|(^|\.)worldbank\.org$|(^|\.)imf\.org$|(^|\.)oecd\.org$|(^|\.)wto\.org$|(^|\.)icc-cpi\.int$|(^|\.)icj-cij\.org$/i.test(domain)) score += 8;
+  if (/official|government|ministry|parliament|court|tribunal|commission|agency|secretariat|treaty|resolution|report|statement|vote|voting|policy|implementation|compliance|agreement|findings|audit|inquiry|investigation/i.test(hay)) score += 4;
+  if (endpoint === '/search/news' && /investigation|controversy|allegation|misconduct|failure|dispute|findings|probe|inquiry|accountability|announced|reported/i.test(hay)) score += 3;
+  if (/wikipedia\.org|blogspot|medium\.com/i.test(domain)) score -= 6;
+  return score;
+}
 function isAfterFreezeDate(dateValue, freezeDate) {
   if (!dateValue || !freezeDate) return false;
   const date = new Date(dateValue);
   const freeze = new Date(`${freezeDate}T23:59:59Z`);
   return Number.isFinite(date.getTime()) && Number.isFinite(freeze.getTime()) && date > freeze;
 }
-function retainResults({ results, search, endpoint, byUrl, contentSignatures, stats, freezeDate = '', sourceBudget = DDGS_LIMITS.absoluteSafetyCeiling }) {
+function retainResults({ results, search, endpoint, byUrl, contentSignatures, stats, freezeDate = '', sourceBudget = DDGS_LIMITS.absoluteSafetyCeiling, form = {}, selectedTargets = [], poiTypes = [] }) {
   let added = 0;
   for (const result of results) {
     if (byUrl.size >= sourceBudget) break;
     const source = sourceFromResult(result, search.query, search.backend, endpoint);
+    source.relevanceScore = scoreResult({ ...result, url: source.url, domain: source.domain }, { form, selectedTargets, poiTypes, query: search.query, endpoint });
     const signature = contentSignature(result);
     if (!source.url || /wikipedia\.org/i.test(source.url) || isAfterFreezeDate(source.publicationDate || source.date, freezeDate)) { stats.filteredUrls += 1; stats.rejectedSources = (stats.rejectedSources || 0) + 1; continue; }
-    if (byUrl.has(source.url) || (signature && contentSignatures.has(signature))) { stats.deduplicatedUrls += 1; stats.duplicateUrls = (stats.duplicateUrls || 0) + 1; continue; }
+    if (byUrl.has(source.url)) { stats.deduplicatedUrls += 1; stats.duplicateUrls = (stats.duplicateUrls || 0) + 1; continue; }
+    if (signature && contentSignatures.has(signature)) { stats.deduplicatedUrls += 1; stats.contentDuplicates = (stats.contentDuplicates || 0) + 1; continue; }
     if (signature) contentSignatures.add(signature);
     byUrl.set(source.url, source); added += 1; stats.uniqueUrlsDiscovered = byUrl.size;
   }
@@ -299,7 +331,7 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
   if (!health.ok) return { schema: 'DDGS API /search/text + /search/news + /extract (OpenAPI 3.1.0)', health, queries: initialQueries, sources: [], retrievedSources: [], bangUrls: [], automaticTargetCandidates: [], failures: [{ status: 'DDGS_API_UNAVAILABLE', detail: health.detail, category: 'ddgs-research-failure' }], stats: { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, queryCount: initialQueries.length, discoveredUrls: 0, retainedUrls: 0, deduplicatedUrls: 0, textSearches: 0, newsSearches: 0, retrievedSources: 0, extractionFailed: 0, hardMax: budget.hardMax, sourceBudget: budget.sourceBudget, queryBudget: budget.queryBudget, extractionBudget: budget.extractionBudget, extractionCallsRemaining: budget.extractionBudget, softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, targetUrls: budget.targetUrls, degraded: true } };
 
   const byUrl = new Map((researchState?.sources || []).map((source) => [canonicalUrl(source.canonicalUrl || source.url), source]).filter(([url]) => url)); const contentSignatures = new Set(researchState?.contentSignatures || []); for (const source of byUrl.values()) { const sig = contentSignature(source); if (sig) contentSignatures.add(sig); } const failures = [...(researchState?.failedQueries || [])]; const searched = new Set([...(researchState?.searchedQueryKeys || []), ...(researchState?.exhaustedQueryKeys || [])]); const newsSearched = new Set(researchState?.newsQueryKeys || []); const queryQueue = [...initialQueries]; const extractionCache = buildExtractionCache(researchState || {}); const priorExtractionCalls = Number(researchState?.researchBudgetConsumed?.extractionCalls || researchState?.researchBudgetConsumed?.extractions || 0); let extractionCalls = priorExtractionCalls;
-  const stats = { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, deduplicatedUrls: 0, duplicateUrls: 0, filteredUrls: 0, rejectedSources: 0, cachedSources: 0, textSearches: 0, newsSearches: 0, extractionCompleted: 0, extractionFailed: 0, retryBackoffs: 0, throttleBackoffs: 0, extractionReused: 0, extractionSkippedBudget: 0, rawResults: 0, rejectedUrls: 0, duplicateHeavyExpansions: 0 };
+  const stats = { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, deduplicatedUrls: 0, duplicateUrls: 0, contentDuplicates: 0, filteredUrls: 0, rejectedSources: 0, cachedSources: 0, textSearches: 0, newsSearches: 0, extractionCompleted: 0, extractionFailed: 0, retryBackoffs: 0, throttleBackoffs: 0, extractionReused: 0, extractionSkippedBudget: 0, rawResults: 0, rejectedUrls: 0, duplicateHeavyExpansions: 0 };
   let expansionRound = 0; let staleBatches = 0; let throttleFailures = 0; let throttleExhausted = false;
 
   const passSummaries = [];
@@ -337,7 +369,7 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
         const textSearch = await searchWithBackendFallback(query, resultCountForQuery(query, sliders, '/search/text'), { fetchImpl, baseUrl, delayFn, rng, endpoint: '/search/text', onAttempt: (attempt) => { if (attempt.attempt > 1) stats.retryBackoffs += 1; if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, recoverable: isTransientSearchStatus(attempt.status), category: 'ddgs-research-failure' }); } });
         stats.searchedQueries += 1; stats.textSearches += 1; stats.rawResults += textSearch.results.length;
         if (textSearch.results.length) stats.successfulQueries += 1; else stats.failedQueries += 1;
-        retainResults({ results: textSearch.results, search: textSearch, endpoint: '/search/text', byUrl, contentSignatures, stats, freezeDate: form.freezeDate, sourceBudget: budget.sourceBudget });
+        retainResults({ results: textSearch.results, search: textSearch, endpoint: '/search/text', byUrl, contentSignatures, stats, freezeDate: form.freezeDate, sourceBudget: budget.sourceBudget, form, selectedTargets, poiTypes });
         if (isThrottleStatus(textSearch.status)) { throttleFailures += 1; stats.throttleBackoffs += 1; } else if (textSearch.results.length) throttleFailures = 0;
         if (throttleFailures >= 3) { throttleExhausted = true; break; }
         if (byUrl.size >= passSourceGoal) break;
@@ -346,7 +378,7 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
           const newsSearch = await searchWithBackendFallback(query, resultCountForQuery(query, sliders, '/search/news'), { fetchImpl, baseUrl, delayFn, rng, endpoint: '/search/news', onAttempt: (attempt) => { if (attempt.attempt > 1) stats.retryBackoffs += 1; if (attempt.status !== SEARCH_STATUS.SUCCESS) failures.push({ ...attempt, recoverable: isTransientSearchStatus(attempt.status), category: 'ddgs-research-failure' }); } });
           stats.searchedQueries += 1; stats.newsSearches += 1; stats.rawResults += newsSearch.results.length;
           if (newsSearch.results.length) stats.successfulQueries += 1; else stats.failedQueries += 1;
-          retainResults({ results: newsSearch.results, search: newsSearch, endpoint: '/search/news', byUrl, contentSignatures, stats, freezeDate: form.freezeDate, sourceBudget: budget.sourceBudget });
+          retainResults({ results: newsSearch.results, search: newsSearch, endpoint: '/search/news', byUrl, contentSignatures, stats, freezeDate: form.freezeDate, sourceBudget: budget.sourceBudget, form, selectedTargets, poiTypes });
           if (isThrottleStatus(newsSearch.status)) { throttleFailures += 1; stats.throttleBackoffs += 1; } else if (newsSearch.results.length) throttleFailures = 0;
           if (throttleFailures >= 3) { throttleExhausted = true; break; }
         }
@@ -374,7 +406,7 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
     if (sourceHasCompletedExtraction(source)) { extractionCache.set(key, { ...source, canonicalUrl: key }); stats.extractionReused += 1; stats.cachedSources += 1; continue; }
     extractionCandidates.push({ ...source, canonicalUrl: key });
   }
-  const selectedForExtraction = extractionCandidates.slice(0, remainingExtractionCalls);
+  const selectedForExtraction = extractionCandidates.sort((a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0)).slice(0, remainingExtractionCalls);
   stats.extractionSkippedBudget = Math.max(0, extractionCandidates.length - selectedForExtraction.length);
   if (selectedForExtraction.length) onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Extracting ${selectedForExtraction.length} new source(s); reusing ${stats.extractionReused} cached extraction result(s).`, done: 0, total: extractionCeiling });
   else if (stats.extractionReused) onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `No new extraction required; reusing ${stats.extractionReused} previously processed source(s).`, done: stats.extractionReused, total: extractionCeiling });

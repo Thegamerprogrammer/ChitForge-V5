@@ -7,7 +7,14 @@ import { discoverResearch } from './ddgsResearch.js';
 const MAX_POIS = 250;
 const GENERATION_BATCH_SIZE = 25;
 const MAX_RECOVERY_RESEARCH_ROUNDS = 3;
-const MAX_GENERATION_ATTEMPTS = 15;
+const MIN_ZERO_PROGRESS_GENERATION_ATTEMPTS = 6;
+
+export function generationSafetyCeiling(requestedPoiCount) {
+  const count = Math.max(1, Math.min(MAX_POIS, Math.ceil(Number(requestedPoiCount) || 1)));
+  return Math.min(500, Math.max(20, count * 2));
+}
+
+function zeroProgressLimit(requestedPoiCount) { return Math.max(MIN_ZERO_PROGRESS_GENERATION_ATTEMPTS, Math.ceil((Number(requestedPoiCount) || 1) / 10)); }
 
 export function assertGenerationCompleteBeforeFactCheck(mission, requestedPoiCount) {
   const usablePoiCount = (mission.chits || []).length;
@@ -290,7 +297,7 @@ Distinguish BINDING LEGAL OBLIGATION, NON-BINDING RESOLUTION, POLITICAL COMMITME
 
 POI TYPE instructions: AUTO lets ChitForge/Gemini choose the strongest legitimate category. If one or more types are selected, prioritize and distribute across those types only where evidence supports them. Classification must be evidence-driven, not chosen merely because it sounds aggressive. Include classificationReason explaining why the classification fits.
 
-Type definitions: POLICY CONTRADICTION = stated policy conflicts with conduct/position/vote/commitment; LEGAL ERROR = legally incorrect claim or misinterpretation; LEGAL TRAP = actual legal obligation/framework; COMMITMENT CONTRADICTION = commitment conflicts with actions; EVIDENCE TRAP = documented fact/statistic/report/record; ACCOUNTABILITY = asks to explain documented action; FINANCIAL PRESSURE = debt/lending/financial flows/sanctions/tax/development finance; IMPLEMENTATION FAILURE = commitment implementation falls short; VOTING CONTRADICTION = vote conflicts with stated position; TREATY / OBLIGATION = treaty or formal obligation; HISTORICAL CONTRADICTION = previous position/action conflicts with current position; CONTROVERSY = documented controversy central to POI.
+Type definitions: POLICY CONTRADICTION = stated policy conflicts with conduct/position/vote/commitment; LEGAL ERROR = legally incorrect claim or misinterpretation; LEGAL TRAP = actual legal obligation/framework; COMMITMENT CONTRADICTION = commitment conflicts with actions; EVIDENCE TRAP = documented fact/statistic/report/record; ACCOUNTABILITY = asks to explain documented action; FINANCIAL PRESSURE = lending/financial flows/sanctions/tax/development finance; IMPLEMENTATION FAILURE = commitment implementation falls short; VOTING CONTRADICTION = vote conflicts with stated position; TREATY / OBLIGATION = treaty or formal obligation; HISTORICAL CONTRADICTION = previous position/action conflicts with current position; CONTROVERSY = documented controversy central to POI.
 
 Target countries are optional. If targets are selected, prioritize them. If no countries are selected, perform global research and identify countries relevant to the agenda, portfolio interests, legal obligations, international commitments, policy contradictions, documented controversies, financial conduct, voting behavior, implementation failures, diplomatic disputes, economic relevance, and committee relevance. If target mode is SELECTED + GLOBAL RESEARCH, selected countries must not prevent broader portfolio-interest analysis.
 
@@ -373,33 +380,93 @@ function recoveryFocus(level, analysis) {
   if (analysis.underProduced) pieces.push('Previous Gemini batch under-produced; oversample candidates but retain only supported, non-duplicate POIs.');
   return pieces.join(' ');
 }
-export async function recoverShortfall({ form, sliders, selectedTargets, targetingMode, includeFollowUp, mission, poiCount, poiTypes, modelSelection, researchPacket, onProgress }) {
-  let current = dedupeMission(mission, poiCount);
-  let packet = researchPacket;
-  const recoveryLog = [];
-  let recoveryResearchRounds = 0;
-  const maxAttempts = Math.min(MAX_GENERATION_ATTEMPTS, Math.max(5, Math.ceil(poiCount / GENERATION_BATCH_SIZE) + 4));
-  for (let level = 1; current.chits.length < poiCount && level <= maxAttempts; level += 1) {
-    const remaining = poiCount - current.chits.length;
-    const analysis = analyzeRetention({ before: current.chits, after: current.chits, requested: poiCount });
-    recoveryLog.push({ level, ...analysis, remaining });
-    onProgress?.({ stage: 'RECOVERING GENERATION', detail: `${current.chits.length} / ${poiCount} valid POIs — recovering ${remaining} rejected or missing candidate(s).`, done: current.chits.length, total: poiCount });
-    if (packet?.needsSupplementalRecoveryResearch && level >= 2 && recoveryResearchRounds < MAX_RECOVERY_RESEARCH_ROUNDS && (analysis.evidenceFailures || analysis.duplicateCount || level >= 3)) {
-      recoveryResearchRounds += 1;
-      onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Recovery research round ${recoveryResearchRounds}/${MAX_RECOVERY_RESEARCH_ROUNDS}: reusing existing corpus and extracting only new URLs.`, done: current.chits.length, total: poiCount });
-      const expansion = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount, researchState: packet?.researchState, onProgress });
-      packet = { ...(packet || {}), ...expansion, sources: expansion.sources || [], retrievedSources: expansion.retrievedSources || [], failures: expansion.failures || [], researchState: expansion.researchState, recoveryExpansions: [...(packet?.recoveryExpansions || []), expansion.stats] };
-    }
-    const askFor = remaining;
-    const beforeCount = current.chits.length;
-    const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount: askFor, poiTypes, researchPacket: packet, batchNumber: level, totalBatches: maxAttempts, previousPoiMetadata: compactPoiMetadata(current.chits) }) + `\n\nRECOVERY INSTRUCTIONS: ${recoveryFocus(level, analysis)} Need exactly ${remaining} more final POIs. Return ${askFor} candidate POIs; ChitForge will keep only defensible non-duplicates.`;
-    try {
-      const response = await callGemini(form.apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA });
-      const extra = await recoverMission({ apiKey: form.apiKey, text: response.text, ctx: { form, sliders, includeFollowUp, poiCount: askFor, targetingMode: `recovery-${level}`, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
-      current = { ...mergeRecoveryCandidates(current, extra.chits, poiCount), recommendedTargets: [...(current.recommendedTargets || []), ...(extra.recommendedTargets || [])] };
-    } catch (error) { recoveryLog.at(-1).error = error?.message || String(error); }
-    if (current.chits.length === beforeCount && level >= 3) recoveryLog.at(-1).diminishingReturns = true;
+
+function recoveryContextSummary({ current, requestedPoiCount, remainingPoiCount, recoveryLog }) {
+  const accepted = compactPoiMetadata(current.chits || []);
+  const targetCounts = new Map();
+  const pressureCounts = new Map();
+  const evidence = new Set();
+  for (const poi of current.chits || []) {
+    const target = poi.target || 'AUTO-DISCOVERED TARGET';
+    targetCounts.set(target, (targetCounts.get(target) || 0) + 1);
+    const pressure = poi.documentedIssue || poi.pressurePoint?.conflict || poi.tacticalImpact || poi.classification || 'unspecified pressure';
+    pressureCounts.set(String(pressure).slice(0, 140), (pressureCounts.get(String(pressure).slice(0, 140)) || 0) + 1);
+    for (const item of poi.evidence || []) if (item.url || item.sourceName) evidence.add(item.url || item.sourceName);
   }
-  current.metadata = { ...(current.metadata || {}), initialGenerationDiagnostics: mission.diagnostics || {}, recoveryResearchRounds, maxRecoveryResearchRounds: MAX_RECOVERY_RESEARCH_ROUNDS, recoveryLog, partialResult: current.chits.length < poiCount, partialResultReason: current.chits.length < poiCount ? `${current.chits.length} of ${poiCount} defensible POIs generated. Additional candidates were not retained because bounded recovery could not establish enough distinct supported POIs.` : '' };
+  const overusedTargets = [...targetCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const overusedPressures = [...pressureCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const rejectedPatterns = (recoveryLog || []).slice(-5).map((entry) => ({ level: entry.level, duplicateRejected: entry.duplicateRejected || 0, validationRejected: entry.validationRejected || 0, accepted: entry.accepted || 0, remaining: entry.remainingAfter ?? entry.remaining }));
+  return `
+RECOVERY STATE — DO NOT IGNORE:
+REQUESTED COUNT: ${requestedPoiCount}
+CURRENT ACCEPTED COUNT: ${(current.chits || []).length}
+REMAINING COUNT: ${remainingPoiCount}
+ALREADY ACCEPTED POIs / PRESSURE METADATA:
+${JSON.stringify(accepted).slice(0, 22000)}
+ALREADY USED TARGET COUNTS:
+${JSON.stringify(overusedTargets)}
+ALREADY USED PRESSURE POINTS:
+${JSON.stringify(overusedPressures)}
+ALREADY USED EVIDENCE URLS / SOURCES:
+${JSON.stringify([...evidence].slice(0, 120)).slice(0, 12000)}
+RECENT REJECTED / DUPLICATE PATTERNS:
+${JSON.stringify(rejectedPatterns)}
+Generate ONLY the ${remainingPoiCount} missing distinct POIs. Bias toward underrepresented targets, underused evidence, and pressure angles not represented above. A prior under-filled batch is not failure; continue with new distinct usable POIs.`;
+}
+
+export async function recoverPoiShortfallLoop({ mission, poiCount, generateCandidates, onProgress, initialRecoveryLog = [] }) {
+  const requestedPoiCount = poiCount;
+  let current = dedupeMission(mission, requestedPoiCount);
+  const recoveryLog = [...initialRecoveryLog];
+  const maxAttempts = generationSafetyCeiling(requestedPoiCount);
+  const maxZeroProgress = zeroProgressLimit(requestedPoiCount);
+  let consecutiveZeroProgress = 0;
+  for (let level = 1; current.chits.length < requestedPoiCount && level <= maxAttempts && consecutiveZeroProgress < maxZeroProgress; level += 1) {
+    const usablePoiCount = current.chits.length;
+    const remainingPoiCount = requestedPoiCount - usablePoiCount;
+    const analysis = analyzeRetention({ before: current.chits, after: current.chits, requested: requestedPoiCount });
+    onProgress?.({ stage: 'RECOVERING GENERATION', detail: `${usablePoiCount} / ${requestedPoiCount} valid POIs — generating remaining ${remainingPoiCount}.`, done: usablePoiCount, total: requestedPoiCount });
+    const beforeCount = current.chits.length;
+    const batchRecord = { level, requested: remainingPoiCount, requestedPoiCount, usableBefore: usablePoiCount, remainingBefore: remainingPoiCount };
+    try {
+      const result = await generateCandidates({ level, requestedPoiCount, usablePoiCount, remainingPoiCount, current, analysis, recoveryLog });
+      const candidates = result?.candidates || [];
+      const diagnostics = result?.diagnostics || {};
+      const merged = mergeRecoveryCandidates(current, candidates, requestedPoiCount);
+      const accepted = merged.chits.length - beforeCount;
+      Object.assign(batchRecord, { rawCandidates: diagnostics.candidatesFound ?? candidates.length, parsed: diagnostics.parseSucceeded === false ? 0 : (diagnostics.candidatesFound ?? candidates.length), normalized: diagnostics.normalizedPois ?? candidates.length, validationRejected: Math.max(0, (diagnostics.candidatesFound ?? candidates.length) - (diagnostics.normalizedPois ?? candidates.length)), duplicateRejected: Math.max(0, candidates.length - accepted), accepted, remainingAfter: Math.max(0, requestedPoiCount - merged.chits.length), parseSucceeded: diagnostics.parseSucceeded, parseError: diagnostics.parseError || '' });
+      current = { ...merged, recommendedTargets: [...(current.recommendedTargets || []), ...(result?.recommendedTargets || [])] };
+      consecutiveZeroProgress = accepted > 0 ? 0 : consecutiveZeroProgress + 1;
+      onProgress?.({ stage: 'RECOVERING GENERATION', detail: `Recovery batch ${level}: accepted ${accepted}; ${current.chits.length}/${requestedPoiCount} complete; ${Math.max(0, requestedPoiCount - current.chits.length)} remaining.`, done: current.chits.length, total: requestedPoiCount });
+    } catch (error) {
+      Object.assign(batchRecord, { error: error?.message || String(error), accepted: 0, remainingAfter: remainingPoiCount });
+      consecutiveZeroProgress += 1;
+    }
+    recoveryLog.push(batchRecord);
+  }
+  current.metadata = { ...(current.metadata || {}), initialGenerationDiagnostics: mission.diagnostics || {}, recoveryLog, generationAttemptsUsed: recoveryLog.length, maxGenerationAttempts: maxAttempts, zeroProgressLimit: maxZeroProgress, partialResult: current.chits.length < requestedPoiCount, partialResultReason: current.chits.length < requestedPoiCount ? `${current.chits.length} of ${requestedPoiCount} defensible POIs generated. Generation stopped only after ${recoveryLog.length} adaptive attempts with ${consecutiveZeroProgress} consecutive zero-progress attempt(s).` : '' };
   return current;
+}
+export async function recoverShortfall({ form, sliders, selectedTargets, targetingMode, includeFollowUp, mission, poiCount, poiTypes, modelSelection, researchPacket, onProgress }) {
+  let packet = researchPacket;
+  let recoveryResearchRounds = 0;
+  const generated = await recoverPoiShortfallLoop({
+    mission,
+    poiCount,
+    onProgress,
+    generateCandidates: async ({ level, requestedPoiCount, remainingPoiCount, current, analysis, recoveryLog }) => {
+      if (packet?.needsSupplementalRecoveryResearch && level >= 2 && recoveryResearchRounds < MAX_RECOVERY_RESEARCH_ROUNDS && (analysis.evidenceFailures || analysis.duplicateCount || level >= 3)) {
+        recoveryResearchRounds += 1;
+        onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Recovery research round ${recoveryResearchRounds}/${MAX_RECOVERY_RESEARCH_ROUNDS}: reusing existing corpus and extracting only new URLs.`, done: current.chits.length, total: requestedPoiCount });
+        const expansion = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount: requestedPoiCount, researchState: packet?.researchState, onProgress });
+        packet = { ...(packet || {}), ...expansion, sources: expansion.sources || [], retrievedSources: expansion.retrievedSources || [], failures: expansion.failures || [], researchState: expansion.researchState, recoveryExpansions: [...(packet?.recoveryExpansions || []), expansion.stats] };
+      }
+      const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount: remainingPoiCount, poiTypes, researchPacket: packet, batchNumber: level, totalBatches: generationSafetyCeiling(requestedPoiCount), previousPoiMetadata: compactPoiMetadata(current.chits) }) + `\n\nRECOVERY INSTRUCTIONS: ${recoveryFocus(level, analysis)} Need exactly ${remainingPoiCount} more final POIs, not a summary and not fewer by choice. Return ${remainingPoiCount} candidate POIs; ChitForge will keep only defensible non-duplicates.` + recoveryContextSummary({ current, requestedPoiCount, remainingPoiCount, recoveryLog });
+      const response = await callGemini(form.apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA });
+      const extra = await recoverMission({ apiKey: form.apiKey, text: response.text, ctx: { form, sliders, includeFollowUp, poiCount: remainingPoiCount, targetingMode: `recovery-${level}`, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
+      return { candidates: extra.chits, diagnostics: extra.diagnostics, recommendedTargets: extra.recommendedTargets };
+    },
+  });
+  generated.metadata = { ...(generated.metadata || {}), recoveryResearchRounds, maxRecoveryResearchRounds: MAX_RECOVERY_RESEARCH_ROUNDS };
+  return generated;
 }
