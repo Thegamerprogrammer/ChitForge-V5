@@ -372,8 +372,10 @@ export async function recoverShortfall({ form, sliders, selectedTargets, targeti
     onProgress?.({ stage: 'RECOVERING GENERATION', detail: `${current.chits.length} / ${poiCount} valid POIs — recovering ${remaining} rejected or missing candidate(s).`, done: current.chits.length, total: poiCount });
     if (level >= 2 && (analysis.evidenceFailures || analysis.duplicateCount || level >= 3)) {
       onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: 'Expanding evidence coverage for missing tactical angles.', done: current.chits.length, total: poiCount });
-      const expansion = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount: remaining, recoveryFocus: recoveryFocus(level, analysis), onProgress });
-      packet = { ...(packet || {}), sources: [...(packet?.sources || []), ...(expansion.sources || [])], retrievedSources: [...(packet?.retrievedSources || []), ...(expansion.retrievedSources || [])], failures: [...(packet?.failures || []), ...(expansion.failures || [])], recoveryExpansions: [...(packet?.recoveryExpansions || []), expansion.stats] };
+      const expansion = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount, recoveryFocus: recoveryFocus(level, analysis), researchState: packet?.researchState, onProgress });
+      const sourceMap = new Map([...(packet?.sources || []), ...(expansion.sources || [])].map((source) => [source.url || source.canonicalUrl, source]));
+      const retrievedMap = new Map([...(packet?.retrievedSources || []), ...(expansion.retrievedSources || [])].map((source) => [source.url || source.canonicalUrl, source]));
+      packet = { ...(packet || {}), sources: [...sourceMap.values()], retrievedSources: [...retrievedMap.values()], failures: [...(packet?.failures || []), ...(expansion.failures || [])], queries: [...new Set([...(packet?.queries || []), ...(expansion.queries || [])])], plannedQueries: [...new Set([...(packet?.plannedQueries || []), ...(expansion.plannedQueries || [])])], researchState: expansion.researchState || packet?.researchState, recoveryExpansions: [...(packet?.recoveryExpansions || []), expansion.stats] };
     }
     const askFor = Math.min(GENERATION_BATCH_SIZE, Math.ceil(remaining * Math.min(1.6, 1.15 + (analysis.duplicateCount + analysis.evidenceFailures + analysis.underProduced) / Math.max(25, poiCount))));
     const beforeCount = current.chits.length;

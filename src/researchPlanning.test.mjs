@@ -17,10 +17,10 @@ const selectedTargets = [];
 const queries = buildResearchQueries({ form, sliders, selectedTargets, targetingMode: 'selected_global', poiTypes: ['LEGAL TRAP', 'VOTING CONTRADICTION'] });
 assert(queries.some((q) => q.includes(form.agenda)), 'agenda is used in DDGS planning');
 assert(queries.some((q) => q.includes(form.portfolio)), 'portfolio is used in DDGS planning');
-assert(queries.some((q) => q.includes('before 2024-12-31')), 'Freeze Date is used in DDGS planning');
+assert(!queries.some((q) => /before 2024-12-31|before:2024-12-31/.test(q)), 'Freeze Date is not emitted as unsupported DDGS query syntax');
 assert(queries.some((q) => q.includes('voting contradictions')), 'Research Notes are used in DDGS planning');
-assert(queries.some((q) => q.includes('bg-ukraine.md')), 'Background Guide artifact name is used in DDGS planning');
-assert(queries.some((q) => /foreign policy doctrine|foreign policy/.test(q)), 'portfolio foreign policy research is planned');
+assert(queries.some((q) => /humanitarian access|civilian protection|Security Council/i.test(q)), 'Background Guide text influences DDGS planning');
+assert(queries.some((q) => /official position|policy|commitment/.test(q) && q.includes(form.portfolio)), 'portfolio agenda research is planned');
 const sources = [
   { title: 'Russia blocks Security Council action on Ukraine humanitarian access', snippet: 'Russia and Ukraine civilian protection obligations', domain: 'un.org' },
   { title: 'China voting record on Ukraine resolutions', snippet: 'China abstentions and policy contradiction', domain: 'digitallibrary.un.org' },
