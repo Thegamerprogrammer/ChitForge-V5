@@ -225,6 +225,31 @@ async function extractOnce(source, { fetchImpl = fetch, baseUrl = DDGS_BASE_URL 
 }
 export async function extractSource(source, options = {}) { return extractOnce(source, options); }
 
+function extractionCacheEntries(cache) {
+  if (!cache) return [];
+  if (Array.isArray(cache)) return cache;
+  if (cache instanceof Map) return [...cache.entries()].map(([canonicalUrlValue, source]) => ({ canonicalUrl: canonicalUrlValue, source }));
+  return Object.entries(cache).map(([canonicalUrlValue, source]) => ({ canonicalUrl: canonicalUrlValue, source }));
+}
+function sourceHasCompletedExtraction(source = {}) {
+  const status = source.extractionStatus || source.retrievalStatus || '';
+  return Boolean(source.extractedText) || (status && status !== EXTRACTION_STATUS.DISCOVERED);
+}
+function buildExtractionCache(researchState = {}) {
+  const cache = new Map();
+  for (const entry of extractionCacheEntries(researchState.extractionCache)) {
+    const source = entry?.source || entry?.value || entry;
+    const key = canonicalUrl(entry?.canonicalUrl || source?.canonicalUrl || source?.url || '');
+    if (key && sourceHasCompletedExtraction(source)) cache.set(key, { ...source, canonicalUrl: key, url: source.url || key });
+  }
+  for (const source of researchState.sources || []) {
+    const key = canonicalUrl(source.canonicalUrl || source.url || '');
+    if (key && sourceHasCompletedExtraction(source) && !cache.has(key)) cache.set(key, { ...source, canonicalUrl: key, url: source.url || key });
+  }
+  return cache;
+}
+function serializeExtractionCache(cache) { return [...cache.entries()].map(([canonicalUrlValue, source]) => ({ canonicalUrl: canonicalUrlValue, source })); }
+
 function sourceFromResult(result, query, backend, endpoint = '/search/text') {
   const url = canonicalUrl(result.href || result.url || result.link);
   const domain = domainFromResult(url);
@@ -264,10 +289,10 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
   const health = skipHealthCheck ? { ok: true, status: 200, detail: 'DDGS health check skipped by test harness.' } : await checkDdgsHealth({ fetchImpl, baseUrl });
   const budget = planResearchBudget({ poiCount });
   const initialQueries = buildResearchQueries({ form, sliders, selectedTargets, targetingMode, poiTypes, queryBudget: budget.queryBudget });
-  if (!health.ok) return { schema: 'DDGS API /search/text + /search/news + /extract (OpenAPI 3.1.0)', health, queries: initialQueries, sources: [], retrievedSources: [], bangUrls: [], automaticTargetCandidates: [], failures: [{ status: 'DDGS_API_UNAVAILABLE', detail: health.detail, category: 'ddgs-research-failure' }], stats: { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, queryCount: initialQueries.length, discoveredUrls: 0, retainedUrls: 0, deduplicatedUrls: 0, textSearches: 0, newsSearches: 0, retrievedSources: 0, extractionFailed: 0, hardMax: budget.hardMax, sourceBudget: budget.sourceBudget, queryBudget: budget.queryBudget, extractionBudget: budget.extractionBudget, softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, targetUrls: budget.targetUrls, degraded: true } };
+  if (!health.ok) return { schema: 'DDGS API /search/text + /search/news + /extract (OpenAPI 3.1.0)', health, queries: initialQueries, sources: [], retrievedSources: [], bangUrls: [], automaticTargetCandidates: [], failures: [{ status: 'DDGS_API_UNAVAILABLE', detail: health.detail, category: 'ddgs-research-failure' }], stats: { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, queryCount: initialQueries.length, discoveredUrls: 0, retainedUrls: 0, deduplicatedUrls: 0, textSearches: 0, newsSearches: 0, retrievedSources: 0, extractionFailed: 0, hardMax: budget.hardMax, sourceBudget: budget.sourceBudget, queryBudget: budget.queryBudget, extractionBudget: budget.extractionBudget, extractionCallsRemaining: budget.extractionBudget, softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, targetUrls: budget.targetUrls, degraded: true } };
 
-  const byUrl = new Map((researchState?.sources || []).map((source) => [source.canonicalUrl || source.url, source])); const contentSignatures = new Set(researchState?.contentSignatures || []); for (const source of byUrl.values()) { const sig = contentSignature(source); if (sig) contentSignatures.add(sig); } const failures = [...(researchState?.failedQueries || [])]; const searched = new Set([...(researchState?.searchedQueryKeys || []), ...(researchState?.exhaustedQueryKeys || [])]); const newsSearched = new Set(researchState?.newsQueryKeys || []); const queryQueue = [...initialQueries];
-  const stats = { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, deduplicatedUrls: 0, filteredUrls: 0, textSearches: 0, newsSearches: 0, extractionCompleted: 0, extractionFailed: 0, retryBackoffs: 0, throttleBackoffs: 0 };
+  const byUrl = new Map((researchState?.sources || []).map((source) => [canonicalUrl(source.canonicalUrl || source.url), source]).filter(([url]) => url)); const contentSignatures = new Set(researchState?.contentSignatures || []); for (const source of byUrl.values()) { const sig = contentSignature(source); if (sig) contentSignatures.add(sig); } const failures = [...(researchState?.failedQueries || [])]; const searched = new Set([...(researchState?.searchedQueryKeys || []), ...(researchState?.exhaustedQueryKeys || [])]); const newsSearched = new Set(researchState?.newsQueryKeys || []); const queryQueue = [...initialQueries]; const extractionCache = buildExtractionCache(researchState || {}); const priorExtractionCalls = Number(researchState?.researchBudgetConsumed?.extractionCalls || researchState?.researchBudgetConsumed?.extractions || 0); let extractionCalls = priorExtractionCalls;
+  const stats = { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, deduplicatedUrls: 0, filteredUrls: 0, textSearches: 0, newsSearches: 0, extractionCompleted: 0, extractionFailed: 0, retryBackoffs: 0, throttleBackoffs: 0, extractionReused: 0, extractionSkippedBudget: 0 };
   let expansionRound = 0; let staleBatches = 0; let throttleFailures = 0; let throttleExhausted = false;
 
   while (byUrl.size < budget.sourceBudget && searched.size < budget.queryBudget) {
@@ -314,15 +339,35 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
 
   const sources = [...byUrl.values()].slice(0, budget.sourceBudget);
   const retrieved = [];
-  for (const source of sources.slice(0, Math.min(budget.extractionBudget, sources.length))) {
+  const extractionCeiling = budget.extractionBudget;
+  const remainingExtractionCalls = Math.max(0, extractionCeiling - extractionCalls);
+  const extractionCandidates = [];
+  for (const source of sources) {
+    const key = canonicalUrl(source.canonicalUrl || source.url);
+    const cached = extractionCache.get(key);
+    if (cached) { stats.extractionReused += 1; continue; }
+    if (sourceHasCompletedExtraction(source)) { extractionCache.set(key, { ...source, canonicalUrl: key }); stats.extractionReused += 1; continue; }
+    extractionCandidates.push({ ...source, canonicalUrl: key });
+  }
+  const selectedForExtraction = extractionCandidates.slice(0, remainingExtractionCalls);
+  stats.extractionSkippedBudget = Math.max(0, extractionCandidates.length - selectedForExtraction.length);
+  if (selectedForExtraction.length) onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Extracting ${selectedForExtraction.length} new source(s); reusing ${stats.extractionReused} cached extraction result(s).`, done: 0, total: extractionCeiling });
+  else if (stats.extractionReused) onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `No new extraction required; reusing ${stats.extractionReused} previously processed source(s).`, done: stats.extractionReused, total: extractionCeiling });
+  for (let i = 0; i < selectedForExtraction.length; i += 1) {
+    const source = selectedForExtraction[i];
+    onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Extracting ${i + 1}/${selectedForExtraction.length} selected source(s).`, done: i + 1, total: selectedForExtraction.length });
     const extracted = await extractSource(source, { fetchImpl, baseUrl });
-    retrieved.push(extracted);
-    if (extracted.extractionStatus === EXTRACTION_STATUS.RETRIEVED) stats.extractionCompleted += 1; else stats.extractionFailed += 1;
+    const key = canonicalUrl(extracted.canonicalUrl || extracted.url || source.url);
+    const cached = { ...extracted, canonicalUrl: key || extracted.canonicalUrl || source.canonicalUrl };
+    if (key) extractionCache.set(key, cached);
+    retrieved.push(cached); extractionCalls += 1;
+    if (cached.extractionStatus === EXTRACTION_STATUS.RETRIEVED) stats.extractionCompleted += 1; else stats.extractionFailed += 1;
     await delayFn(randomDelay(DDGS_SEARCH_DELAY.extractMinMs, DDGS_SEARCH_DELAY.extractMaxMs, rng), { kind: 'extract-pace', url: source.url });
   }
-  const retrievedByUrl = new Map(retrieved.map((source) => [source.url, source]));
-  const merged = sources.map((source) => retrievedByUrl.get(source.url) || source);
+  const retrievedByUrl = new Map([...extractionCache.entries()].map(([url, source]) => [url, source]));
+  const merged = sources.map((source) => retrievedByUrl.get(canonicalUrl(source.canonicalUrl || source.url)) || source);
+  const retrievedCorpus = merged.filter((source) => sourceHasCompletedExtraction(source));
   const automaticTargetCandidates = deriveAutomaticTargetCandidates({ form, sources: merged, selectedTargets });
   const searchedQueries = [...searched];
-  return { schema: 'DDGS API /search/text + /search/news + /extract (OpenAPI 3.1.0)', health, queries: searchedQueries, plannedQueries: [...new Set([...searchedQueries, ...queryQueue])], sources: merged, retrievedSources: retrieved, bangUrls: merged.map((s) => s.bangUrl).filter(Boolean), automaticTargetCandidates, failures, stats: { ...stats, queryCount: searchedQueries.length, discoveredUrls: byUrl.size, retainedUrls: merged.length, retrievedSources: retrieved.filter((s) => s.extractedText).length, bangUrls: merged.filter((s) => s.bangUrl).length, hardMax: budget.hardMax, sourceBudget: budget.sourceBudget, queryBudget: budget.queryBudget, extractionBudget: budget.extractionBudget, softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, targetUrls: budget.targetUrls, degraded: throttleExhausted || merged.length < budget.preferredMin, throttleExhausted, uniqueUrlsDiscovered: byUrl.size, researchBudgetConsumed: { queries: searched.size, sources: byUrl.size, extractions: retrieved.length } }, researchState: { searchedQueryKeys: [...searched], exhaustedQueryKeys: [...searched], newsQueryKeys: [...newsSearched], canonicalSourceUrls: [...byUrl.keys()], contentSignatures: [...contentSignatures], failedQueries: failures, throttledNewsState: { disabled: throttleExhausted }, recoveryRound: Number(researchState?.recoveryRound || 0) + (researchState ? 1 : 0), researchBudgetConsumed: { queries: searched.size, sources: byUrl.size, extractions: retrieved.length }, sources: merged } }; 
+  return { schema: 'DDGS API /search/text + /search/news + /extract (OpenAPI 3.1.0)', health, queries: searchedQueries, plannedQueries: [...new Set([...searchedQueries, ...queryQueue])], sources: merged, retrievedSources: retrievedCorpus, bangUrls: merged.map((s) => s.bangUrl).filter(Boolean), automaticTargetCandidates, failures, stats: { ...stats, queryCount: searchedQueries.length, discoveredUrls: byUrl.size, retainedUrls: merged.length, retrievedSources: retrievedCorpus.filter((s) => s.extractedText).length, bangUrls: merged.filter((s) => s.bangUrl).length, hardMax: budget.hardMax, sourceBudget: budget.sourceBudget, queryBudget: budget.queryBudget, extractionBudget: budget.extractionBudget, extractionCallsRemaining: Math.max(0, budget.extractionBudget - extractionCalls), softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, targetUrls: budget.targetUrls, degraded: throttleExhausted || merged.length < budget.preferredMin, throttleExhausted, uniqueUrlsDiscovered: byUrl.size, researchBudgetConsumed: { queries: searched.size, sources: byUrl.size, extractions: extractionCalls, extractionCalls } }, researchState: { searchedQueryKeys: [...searched], exhaustedQueryKeys: [...searched], newsQueryKeys: [...newsSearched], canonicalSourceUrls: [...byUrl.keys()], contentSignatures: [...contentSignatures], extractionCache: serializeExtractionCache(extractionCache), failedQueries: failures, throttledNewsState: { disabled: throttleExhausted }, recoveryRound: Number(researchState?.recoveryRound || 0) + (researchState ? 1 : 0), researchBudgetConsumed: { queries: searched.size, sources: byUrl.size, extractions: extractionCalls, extractionCalls }, sources: merged } }; 
 }

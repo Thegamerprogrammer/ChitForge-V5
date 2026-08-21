@@ -6,6 +6,7 @@ import { discoverResearch } from './ddgsResearch.js';
 
 const MAX_POIS = 250;
 const GENERATION_BATCH_SIZE = 25;
+const MAX_RECOVERY_RESEARCH_ROUNDS = 3;
 
 export async function generateMission({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes = ['AUTO'], onProgress, modelSelection }) {
   onProgress?.({ stage: 'INITIALIZING', detail: 'Initializing ChitForge synthesis engine.', done: 0, total: poiCount });
@@ -364,14 +365,16 @@ export async function recoverShortfall({ form, sliders, selectedTargets, targeti
   let current = dedupeMission(mission, poiCount);
   let packet = researchPacket;
   const recoveryLog = [];
+  let recoveryResearchRounds = 0;
   const maxAttempts = Math.min(8, Math.max(3, Math.ceil(poiCount / GENERATION_BATCH_SIZE) + 2));
   for (let level = 1; current.chits.length < poiCount && level <= maxAttempts; level += 1) {
     const remaining = poiCount - current.chits.length;
     const analysis = analyzeRetention({ before: mission.chits, after: current.chits, requested: poiCount });
     recoveryLog.push({ level, ...analysis, remaining });
     onProgress?.({ stage: 'RECOVERING GENERATION', detail: `${current.chits.length} / ${poiCount} valid POIs — recovering ${remaining} rejected or missing candidate(s).`, done: current.chits.length, total: poiCount });
-    if (level >= 2 && (analysis.evidenceFailures || analysis.duplicateCount || level >= 3)) {
-      onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: 'Expanding evidence coverage for missing tactical angles.', done: current.chits.length, total: poiCount });
+    if (level >= 2 && recoveryResearchRounds < MAX_RECOVERY_RESEARCH_ROUNDS && (analysis.evidenceFailures || analysis.duplicateCount || level >= 3)) {
+      recoveryResearchRounds += 1;
+      onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Recovery research round ${recoveryResearchRounds}/${MAX_RECOVERY_RESEARCH_ROUNDS}: reusing existing corpus and extracting only new URLs.`, done: current.chits.length, total: poiCount });
       const expansion = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount, researchState: packet?.researchState, onProgress });
       packet = { ...(packet || {}), ...expansion, sources: expansion.sources || [], retrievedSources: expansion.retrievedSources || [], failures: expansion.failures || [], researchState: expansion.researchState, recoveryExpansions: [...(packet?.recoveryExpansions || []), expansion.stats] };
     }
@@ -385,6 +388,6 @@ export async function recoverShortfall({ form, sliders, selectedTargets, targeti
     } catch (error) { recoveryLog.at(-1).error = error?.message || String(error); }
     if (current.chits.length === beforeCount && level >= 3) recoveryLog.at(-1).diminishingReturns = true;
   }
-  current.metadata = { ...(current.metadata || {}), recoveryLog, partialResult: current.chits.length < poiCount, partialResultReason: current.chits.length < poiCount ? `${current.chits.length} of ${poiCount} defensible POIs generated. Additional candidates were not retained because bounded recovery could not establish enough distinct supported POIs.` : '' };
+  current.metadata = { ...(current.metadata || {}), recoveryResearchRounds, maxRecoveryResearchRounds: MAX_RECOVERY_RESEARCH_ROUNDS, recoveryLog, partialResult: current.chits.length < poiCount, partialResultReason: current.chits.length < poiCount ? `${current.chits.length} of ${poiCount} defensible POIs generated. Additional candidates were not retained because bounded recovery could not establish enough distinct supported POIs.` : '' };
   return current;
 }

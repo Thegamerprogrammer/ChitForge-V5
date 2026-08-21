@@ -198,6 +198,33 @@ assert(recovered.sources.length > previousSourceCount);
 assert.equal(recovered.researchState.searchedQueryKeys.length, previousQueryKeys.size + recoveryCalls.length);
 assert.equal(recovered.stats.sourceBudget, firstRecovery.stats.sourceBudget);
 
+
+const cachedSuccess = { url: 'https://cache.example/success?utm_source=x', canonicalUrl: 'https://cache.example/success', title: 'Cached success', extractedText: 'already extracted', extractionStatus: EXTRACTION_STATUS.RETRIEVED, retrievalStatus: EXTRACTION_STATUS.RETRIEVED };
+const cachedFailure = { url: 'https://cache.example/failure#frag', canonicalUrl: 'https://cache.example/failure', title: 'Cached failure', extractedText: '', extractionStatus: EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_TIMEOUT, retrievalStatus: EXTRACTION_STATUS.DISCOVERED_NOT_RETRIEVED_TIMEOUT };
+const newUnprocessed = { url: 'https://cache.example/new?utm_campaign=x', canonicalUrl: 'https://cache.example/new', title: 'New source', extractionStatus: EXTRACTION_STATUS.DISCOVERED, retrievalStatus: EXTRACTION_STATUS.DISCOVERED, query: 'Example Agenda Topic policy', ddgsQuery: 'Example Agenda Topic policy', backend: 'auto', searchBackend: 'auto', bangUrl: bangUrl('cache.example', 'Example Agenda Topic policy') };
+let cacheExtractCalls = 0;
+const cacheFetch = async (url) => {
+  const path = new URL(String(url)).pathname;
+  if (path === '/extract') { cacheExtractCalls += 1; return Response.json({ content: 'newly extracted content' }); }
+  return Response.json({ results: [] });
+};
+const cacheState = { searchedQueryKeys: Array.from({ length: getResearchQueryBudget(10) }, (_, i) => `already searched ${i}`), exhaustedQueryKeys: [], newsQueryKeys: [], sources: [cachedSuccess, cachedFailure, newUnprocessed], extractionCache: [{ canonicalUrl: cachedSuccess.canonicalUrl, source: cachedSuccess }, { canonicalUrl: cachedFailure.canonicalUrl, source: cachedFailure }], researchBudgetConsumed: { extractionCalls: 2 } };
+const cacheRound = await discoverResearch({ form, sliders: { ...sliders, controversy: 30 }, selectedTargets: [], targetingMode: 'selected_global', poiTypes: [], poiCount: 10, researchState: cacheState, fetchImpl: cacheFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0 });
+assert.equal(cacheExtractCalls, 1, 'only the genuinely new canonical URL is extracted');
+assert.equal(cacheRound.stats.extractionReused, 2, 'successful and failed terminal extraction results are reused');
+assert(cacheRound.researchState.extractionCache.length >= 3, 'new extraction result is cached');
+cacheExtractCalls = 0;
+const cacheRecovery = await discoverResearch({ form, sliders: { ...sliders, controversy: 30 }, selectedTargets: [], targetingMode: 'selected_global', poiTypes: [], poiCount: 10, researchState: cacheRound.researchState, fetchImpl: cacheFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0 });
+assert.equal(cacheExtractCalls, 0, 'recovery does not re-extract successful or terminal failed URLs');
+assert(cacheRecovery.retrievedSources.some((source) => source.extractedText === 'newly extracted content'));
+
+let budgetExtractCalls = 0;
+const budgetSources = Array.from({ length: 10 }, (_, i) => ({ url: `https://budget.example/source-${i}`, canonicalUrl: `https://budget.example/source-${i}`, title: `Budget ${i}`, extractionStatus: EXTRACTION_STATUS.DISCOVERED, retrievalStatus: EXTRACTION_STATUS.DISCOVERED }));
+const budgetFetch = async (url) => { if (new URL(String(url)).pathname === '/extract') { budgetExtractCalls += 1; return Response.json({ content: `budget extracted ${budgetExtractCalls}` }); } return Response.json({ results: [] }); };
+const budgetRound = await discoverResearch({ form, sliders: { ...sliders, controversy: 30 }, selectedTargets: [], targetingMode: 'selected_global', poiTypes: [], poiCount: 2, researchState: { searchedQueryKeys: Array.from({ length: getResearchQueryBudget(2) }, (_, i) => `budget searched ${i}`), sources: budgetSources, researchBudgetConsumed: { extractionCalls: 0 } }, fetchImpl: budgetFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0 });
+assert.equal(budgetExtractCalls, getResearchExtractionBudget(2, getResearchSourceBudget(2)), 'extraction budget is enforced as a run ceiling');
+assert(budgetRound.stats.extractionSkippedBudget > 0);
+
 const researchSource = fs.readFileSync(new URL('./ddgsResearch.js', import.meta.url), 'utf8');
 assert(!/Promise\.all|Promise\.allSettled|worker pool|parallel batch/i.test(researchSource));
 assert(!/G20 Common Framework|Paris Club|IMF debt|World Bank debt|Zambia|China debt|sovereign debt restructuring/.test(researchSource));
