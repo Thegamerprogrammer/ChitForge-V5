@@ -28,6 +28,12 @@ assert.equal(DDGS_SCHEDULING.queryMaxChars, 120);
 
 const budgetCounts = [10, 25, 50, 100, 200];
 const budgets = budgetCounts.map((poiCount) => planResearchBudget({ poiCount }));
+for (const budget of budgets) {
+  assert.equal(budget.sourcesPerPass, budget.poiCount * 6);
+  assert.equal(budget.extractionsPerPass, budget.poiCount * 2);
+  assert.equal(budget.sourceBudget, budget.poiCount * 12);
+  assert.equal(budget.extractionBudget, budget.poiCount * 4);
+}
 for (let i = 1; i < budgets.length; i += 1) {
   assert(budgets[i].sourceBudget > budgets[i - 1].sourceBudget);
   assert(budgets[i].queryBudget > budgets[i - 1].queryBudget);
@@ -154,6 +160,12 @@ const fiftyBudget = planResearchBudget({ poiCount: 50 });
 assert.equal(fiftyBudget.sourcesPerPass, 300);
 assert.equal(fiftyBudget.extractionsPerPass, 100);
 assert.equal(fiftyBudget.primaryPasses, 2);
+assert.equal(planResearchBudget({ poiCount: 10 }).sourcesPerPass, 60);
+assert.equal(planResearchBudget({ poiCount: 10 }).extractionsPerPass, 20);
+assert.equal(planResearchBudget({ poiCount: 25 }).sourcesPerPass, 150);
+assert.equal(planResearchBudget({ poiCount: 25 }).extractionsPerPass, 50);
+assert.equal(planResearchBudget({ poiCount: 200 }).sourcesPerPass, 1200);
+assert.equal(planResearchBudget({ poiCount: 200 }).extractionsPerPass, 400);
 
 let duplicateSearches = 0;
 const duplicateFetch = async (url, options) => {
@@ -169,6 +181,8 @@ const duplicateFetch = async (url, options) => {
 const duplicateHeavy = await discoverResearch({ form, sliders: { ...sliders, controversy: 30 }, selectedTargets: [], targetingMode: 'selected_global', poiTypes: [], poiCount: 10, fetchImpl: duplicateFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0 });
 assert(duplicateHeavy.stats.rawResults > duplicateHeavy.sources.length, 'raw duplicate results do not falsely satisfy useful source targets');
 assert(duplicateHeavy.stats.duplicateHeavyExpansions > 0, 'duplicate-heavy results trigger deeper query expansion');
+assert(duplicateHeavy.stats.duplicateUrls > 0, 'duplicate URLs are tracked separately from useful sources');
+assert(duplicateHeavy.stats.retainedUrls < duplicateHeavy.stats.rawResults, 'duplicate URLs do not count as useful source progress');
 
 let dedupeId = 0;
 const dedupeFetch = async (url, options) => {
@@ -218,6 +232,10 @@ const recoveryFetch = async (url, options) => {
 const recovered = await discoverResearch({ form, sliders: { ...sliders, controversy: 30 }, selectedTargets: [{ iso: 'AAA', name: 'Target Alpha' }], targetingMode: 'selected_global', poiTypes: ['LEGAL TRAP'], poiCount: 100, researchState: partialResearchState, fetchImpl: recoveryFetch, skipHealthCheck: true, delayFn: () => {}, rng: () => 0.5 });
 assert(recoveryCalls.length > 0);
 assert(recovered.sources.length > previousSourceCount);
+assert.equal(recovered.stats.primaryPasses, 2);
+assert.equal(recovered.stats.passSummaries.length, 2);
+assert(recovered.stats.passSummaries[1].queryKeys.every((key) => !new Set(recovered.stats.passSummaries[0].queryKeys).has(key)), 'pass 2 does not repeat pass 1 query keys');
+assert(recovered.researchState.sources.length >= previousSourceCount, 'pass 2 inherits pass 1 source state');
 assert.equal(recovered.researchState.searchedQueryKeys.length, previousQueryKeys.size + recoveryCalls.length);
 assert.equal(recovered.stats.sourceBudget, firstRecovery.stats.sourceBudget);
 

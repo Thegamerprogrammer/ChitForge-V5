@@ -159,9 +159,6 @@ function discoveryTermsFromSources(sources = [], limit = 10) {
   return extractCompactTerms(sources.map((s) => `${s.title || ''}. ${s.snippet || ''}. ${s.domain || ''}`).join('\n'), limit);
 }
 
-function queryKey(query = '') { return normalizeDdgsQuery(query).toLowerCase(); }
-function limitQueries(queries, budget) { return [...new Map(queries.map((q) => [queryKey(q), q])).values()].filter((q) => q && q.length <= DDGS_SCHEDULING.queryMaxChars).slice(0, Math.max(1, budget)); }
-
 function expandResearchQueries({ form, selectedTargets = [], targetingMode, poiTypes = [], round = 0 }) {
   const sliders = { aggression: round >= 2 ? 65 : 35, controversy: round >= 4 ? 65 : 0, diplomacy: round % 2 ? 70 : 30 };
   const base = buildResearchQueries({ form, sliders, selectedTargets, targetingMode, poiTypes, queryBudget: getResearchQueryBudget(250) });
@@ -278,8 +275,8 @@ function retainResults({ results, search, endpoint, byUrl, contentSignatures, st
     if (byUrl.size >= sourceBudget) break;
     const source = sourceFromResult(result, search.query, search.backend, endpoint);
     const signature = contentSignature(result);
-    if (!source.url || /wikipedia\.org/i.test(source.url) || isAfterFreezeDate(source.publicationDate || source.date, freezeDate)) { stats.filteredUrls += 1; continue; }
-    if (byUrl.has(source.url) || (signature && contentSignatures.has(signature))) { stats.deduplicatedUrls += 1; continue; }
+    if (!source.url || /wikipedia\.org/i.test(source.url) || isAfterFreezeDate(source.publicationDate || source.date, freezeDate)) { stats.filteredUrls += 1; stats.rejectedSources = (stats.rejectedSources || 0) + 1; continue; }
+    if (byUrl.has(source.url) || (signature && contentSignatures.has(signature))) { stats.deduplicatedUrls += 1; stats.duplicateUrls = (stats.duplicateUrls || 0) + 1; continue; }
     if (signature) contentSignatures.add(signature);
     byUrl.set(source.url, source); added += 1; stats.uniqueUrlsDiscovered = byUrl.size;
   }
@@ -302,7 +299,7 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
   if (!health.ok) return { schema: 'DDGS API /search/text + /search/news + /extract (OpenAPI 3.1.0)', health, queries: initialQueries, sources: [], retrievedSources: [], bangUrls: [], automaticTargetCandidates: [], failures: [{ status: 'DDGS_API_UNAVAILABLE', detail: health.detail, category: 'ddgs-research-failure' }], stats: { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, queryCount: initialQueries.length, discoveredUrls: 0, retainedUrls: 0, deduplicatedUrls: 0, textSearches: 0, newsSearches: 0, retrievedSources: 0, extractionFailed: 0, hardMax: budget.hardMax, sourceBudget: budget.sourceBudget, queryBudget: budget.queryBudget, extractionBudget: budget.extractionBudget, extractionCallsRemaining: budget.extractionBudget, softMax: budget.softMax, preferredRange: `${budget.preferredMin}-${budget.preferredMax}`, targetUrls: budget.targetUrls, degraded: true } };
 
   const byUrl = new Map((researchState?.sources || []).map((source) => [canonicalUrl(source.canonicalUrl || source.url), source]).filter(([url]) => url)); const contentSignatures = new Set(researchState?.contentSignatures || []); for (const source of byUrl.values()) { const sig = contentSignature(source); if (sig) contentSignatures.add(sig); } const failures = [...(researchState?.failedQueries || [])]; const searched = new Set([...(researchState?.searchedQueryKeys || []), ...(researchState?.exhaustedQueryKeys || [])]); const newsSearched = new Set(researchState?.newsQueryKeys || []); const queryQueue = [...initialQueries]; const extractionCache = buildExtractionCache(researchState || {}); const priorExtractionCalls = Number(researchState?.researchBudgetConsumed?.extractionCalls || researchState?.researchBudgetConsumed?.extractions || 0); let extractionCalls = priorExtractionCalls;
-  const stats = { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, deduplicatedUrls: 0, filteredUrls: 0, textSearches: 0, newsSearches: 0, extractionCompleted: 0, extractionFailed: 0, retryBackoffs: 0, throttleBackoffs: 0, extractionReused: 0, extractionSkippedBudget: 0, rawResults: 0, rejectedUrls: 0, duplicateHeavyExpansions: 0 };
+  const stats = { searchedQueries: 0, successfulQueries: 0, failedQueries: 0, duplicateQueries: 0, uniqueUrlsDiscovered: 0, deduplicatedUrls: 0, duplicateUrls: 0, filteredUrls: 0, rejectedSources: 0, cachedSources: 0, textSearches: 0, newsSearches: 0, extractionCompleted: 0, extractionFailed: 0, retryBackoffs: 0, throttleBackoffs: 0, extractionReused: 0, extractionSkippedBudget: 0, rawResults: 0, rejectedUrls: 0, duplicateHeavyExpansions: 0 };
   let expansionRound = 0; let staleBatches = 0; let throttleFailures = 0; let throttleExhausted = false;
 
   const passSummaries = [];
@@ -318,9 +315,9 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
     onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Research pass ${pass}/${budget.primaryPasses}: ${byUrl.size}/${passSourceGoal} unique sources · ${searched.size}/${passQueryGoal} queries.`, done: byUrl.size - passStartSources, total: Math.max(1, passSourceGoal - passStartSources) });
     while (byUrl.size < passSourceGoal && searched.size < passQueryGoal) {
       const requestedBatchSize = batchSizeForUrlCount(byUrl.size) || DDGS_BATCH_SIZES[Math.min(expansionRound, DDGS_BATCH_SIZES.length - 1)] || 4;
-      while (queryQueue.filter((q) => !searched.has(q)).length < requestedBatchSize && expansionRound < 80) {
+      while (queryQueue.filter((q) => !searched.has(queryKey(q))).length < requestedBatchSize && expansionRound < 80) {
         for (const q of expandResearchQueries({ form, selectedTargets, targetingMode, poiTypes, round: expansionRound + (pass === 2 ? 20 : 0) })) {
-          if (!queryQueue.includes(q)) queryQueue.push(q); else stats.duplicateQueries += 1;
+          if (!queryQueue.some((existing) => queryKey(existing) === queryKey(q)) && !searched.has(queryKey(q))) queryQueue.push(q); else stats.duplicateQueries += 1;
         }
         expansionRound += 1;
       }
@@ -361,7 +358,7 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
       const queryPoolExhausted = !queryQueue.some((q) => !searched.has(queryKey(q))) && expansionRound >= 80;
       if (shouldStopAfterBatch({ retained: byUrl.size, budget: { ...budget, sourceBudget: passSourceGoal, targetUrls: passSourceGoal }, batchYield, staleBatches, queryPoolExhausted, throttleExhausted })) break;
     }
-    passSummaries.push({ pass, sourceTarget: budget.sourcesPerPass, extractionTarget: budget.extractionsPerPass, startSources: passStartSources, endSources: byUrl.size, newSources: byUrl.size - passStartSources, startQueries: passStartQueries, endQueries: searched.size, newQueries: searched.size - passStartQueries });
+    passSummaries.push({ pass, sourceTarget: budget.sourcesPerPass, extractionTarget: budget.extractionsPerPass, startSources: passStartSources, endSources: byUrl.size, newSources: byUrl.size - passStartSources, startQueries: passStartQueries, endQueries: searched.size, newQueries: searched.size - passStartQueries, queryKeys: [...searched].slice(passStartQueries), gaps: pass === 1 ? ['pass-2-fill-underrepresented-targets', 'pass-2-expand-source-evidence'] : [] });
     if (throttleExhausted) break;
   }
 
@@ -373,8 +370,8 @@ export async function discoverResearch({ form, sliders = {}, selectedTargets, ta
   for (const source of sources) {
     const key = canonicalUrl(source.canonicalUrl || source.url);
     const cached = extractionCache.get(key);
-    if (cached) { stats.extractionReused += 1; continue; }
-    if (sourceHasCompletedExtraction(source)) { extractionCache.set(key, { ...source, canonicalUrl: key }); stats.extractionReused += 1; continue; }
+    if (cached) { stats.extractionReused += 1; stats.cachedSources += 1; continue; }
+    if (sourceHasCompletedExtraction(source)) { extractionCache.set(key, { ...source, canonicalUrl: key }); stats.extractionReused += 1; stats.cachedSources += 1; continue; }
     extractionCandidates.push({ ...source, canonicalUrl: key });
   }
   const selectedForExtraction = extractionCandidates.slice(0, remainingExtractionCalls);
