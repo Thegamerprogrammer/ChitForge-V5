@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { analyzeRetention, mergeRecoveryCandidates } from './generation.js';
+import { analyzeRetention, assertGenerationCompleteBeforeFactCheck, mergeRecoveryCandidates } from './generation.js';
 
 const valid = (id) => ({ target: `Target ${id}`, poi: `Why did Target ${id} answer for unique treaty vote ${id} and finance policy ${id}?`, evidence: [{ url: `https://example.org/${id}`, claimSupported: `claim ${id}` }], tacticalImpact: `angle ${id}` });
 const duplicate = { ...valid(1), poi: 'Can Target 1 answer for unique treaty vote 1 and finance policy 1?' };
@@ -16,4 +16,24 @@ const partial = mergeRecoveryCandidates(mission, [], 50);
 assert.equal(partial.chits.length, 43, 'partial valid results are preserved');
 const recoveredExact = mergeRecoveryCandidates(partial, Array.from({ length: 10 }, (_, i) => valid(44 + i)), 50);
 assert.equal(recoveredExact.chits.length, 50, 'successful recovery fills exactly the requested POI count without discarding valid POIs');
+let exactLoop = { chits: [valid(1), valid(2), valid(3)] };
+const requestedPoiCount = 50;
+let usablePoiCount = exactLoop.chits.length;
+let remainingPoiCount = requestedPoiCount - usablePoiCount;
+assert.equal(remainingPoiCount, 47);
+exactLoop = mergeRecoveryCandidates(exactLoop, Array.from({ length: 20 }, (_, i) => valid(4 + i)), requestedPoiCount);
+usablePoiCount = exactLoop.chits.length;
+remainingPoiCount = requestedPoiCount - usablePoiCount;
+assert.equal(usablePoiCount, 23, 'initial 3 plus first recovery 20 are preserved');
+assert.equal(remainingPoiCount, 27, 'remaining is recalculated after first recovery');
+exactLoop = mergeRecoveryCandidates(exactLoop, Array.from({ length: 27 }, (_, i) => valid(24 + i)), requestedPoiCount);
+assert.equal(exactLoop.chits.length, requestedPoiCount, '3 + 20 + 27 reaches exactly 50');
+assert.deepEqual(assertGenerationCompleteBeforeFactCheck(exactLoop, requestedPoiCount), { requestedPoiCount, usablePoiCount: 50, remainingPoiCount: 0 });
+assert.throws(() => assertGenerationCompleteBeforeFactCheck({ chits: Array.from({ length: 49 }, (_, i) => valid(i + 1)) }, 50), /Fact checking was not started/);
+const duplicatesRejected = mergeRecoveryCandidates({ chits: [valid(1)] }, [duplicate, valid(2)], 50);
+assert.equal(duplicatesRejected.chits.length, 2, 'duplicate recovery candidates are rejected while unique candidates survive');
+const zeroRecovery = mergeRecoveryCandidates({ chits: [valid(1), valid(2), valid(3)] }, [], 50);
+assert.equal(zeroRecovery.chits.length, 3, 'zero-candidate recovery is a shortfall, not false success');
+assert.throws(() => assertGenerationCompleteBeforeFactCheck(zeroRecovery, 50), /3\/50/);
+
 console.log('recovery orchestration dry-run passed');

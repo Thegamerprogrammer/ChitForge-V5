@@ -7,6 +7,14 @@ import { discoverResearch } from './ddgsResearch.js';
 const MAX_POIS = 250;
 const GENERATION_BATCH_SIZE = 25;
 const MAX_RECOVERY_RESEARCH_ROUNDS = 3;
+const MAX_GENERATION_ATTEMPTS = 15;
+
+export function assertGenerationCompleteBeforeFactCheck(mission, requestedPoiCount) {
+  const usablePoiCount = (mission.chits || []).length;
+  const remainingPoiCount = Math.max(0, requestedPoiCount - usablePoiCount);
+  if (usablePoiCount !== requestedPoiCount) throw new GeminiError(`Generation shortfall: ${usablePoiCount}/${requestedPoiCount} unique usable POIs generated after bounded recovery. Fact checking was not started.`, { category: 'generation-shortfall', diagnostic: `${remainingPoiCount} POIs remaining` });
+  return { requestedPoiCount, usablePoiCount, remainingPoiCount };
+}
 
 export async function generateMission({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes = ['AUTO'], onProgress, modelSelection }) {
   onProgress?.({ stage: 'INITIALIZING', detail: 'Initializing ChitForge synthesis engine.', done: 0, total: poiCount });
@@ -31,6 +39,7 @@ export async function generateMission({ form, sliders, selectedTargets, targetin
     delete mission._response;
   }
   mission = await recoverShortfall({ form, sliders, selectedTargets, targetingMode, includeFollowUp, mission, poiCount, poiTypes, modelSelection, researchPacket, onProgress });
+  assertGenerationCompleteBeforeFactCheck(mission, poiCount);
   onProgress?.({ stage: 'VALIDATING STRUCTURE', detail: `${mission.chits.length}/${poiCount} usable POIs normalized. Validating source structures...`, done: mission.chits.length, total: poiCount });
   mission.chits = await Promise.all(mission.chits.map(async (poi) => ({ ...poi, evidence: await validateSources(poi.evidence || []) })));
   onProgress?.({ stage: 'CALCULATING PRESSURE', detail: 'Calculating local pressure, word count, line and speaking-time metrics.', done: mission.chits.length, total: poiCount });
@@ -214,7 +223,7 @@ ${previousPoiMetadata.length ? JSON.stringify(previousPoiMetadata).slice(0, 1800
 
 You are an expert competitive Model United Nations strategist.
 
-DDGS results include provenance states: DISCOVERED_FROM_SEARCH search metadata/snippet only, RETRIEVED extracted page text, DISCOVERED_NOT_RETRIEVED, DISCOVERED_DIRECT_EXTRACTION_BLOCKED, RATE_LIMITED and SEARCH_FAILED. Treat snippets as discovery-level evidence only, not retrieved page content. DDGS results are research references and discovery starting points, not the boundary of your research. Use the supplied DDGS URLs and source material, but independently reason through the subject using your own knowledge and analytical capabilities. Identify missing information, relevant policies, historical context, legal instruments, voting behavior, controversies, contradictions and additional relevant facts. Do not restrict your research to the supplied DDGS results. Do not claim model knowledge is a verified external citation. Use the existing ChitForge research/generation methodology, but substantially improve its depth and tactical reasoning. Do not use Google Search Grounding, Gemini Search Grounding, or any hidden search tool.
+DDGS is supplemental research/reference material shared across the entire requested POI set, not a per-POI search pipeline. DDGS results include provenance states: DISCOVERED_FROM_SEARCH search metadata/snippet only, RETRIEVED extracted page text, DISCOVERED_NOT_RETRIEVED, DISCOVERED_DIRECT_EXTRACTION_BLOCKED, RATE_LIMITED and SEARCH_FAILED. Treat snippets as discovery-level evidence only, not retrieved page content. DDGS results are research references and discovery starting points, not the boundary of your research. Use the supplied DDGS URLs and source material, but independently reason through the subject using your own knowledge and analytical capabilities. Identify missing information, relevant policies, historical context, legal instruments, voting behavior, controversies, contradictions and additional relevant facts. Do not restrict your research to the supplied DDGS results. Do not claim model knowledge is a verified external citation. Use the existing ChitForge research/generation methodology, but substantially improve its depth and tactical reasoning. Do not use Google Search Grounding, Gemini Search Grounding, or any hidden search tool.
 
 Before POI generation, explicitly analyze the portfolio country's foreign policy doctrine, strategic priorities, alliances, treaty positions, UN voting patterns, economic diplomacy, historical positions and contradictions. If no manual targets are selected, select targets because they matter to the agenda and produce meaningful tactical material; never select the user's own portfolio as an opposition target. For each automatic target, analyze foreign policy, agenda position, voting record, treaties, commitments, legislation, diplomatic/economic conduct and contradictions against the agenda, Background Guide, portfolio foreign policy and international obligations.
 
@@ -289,7 +298,7 @@ Use authoritative legal sources where relevant: UN Charter, UNSC resolutions, UN
 
 Use reputable external sources for documented controversies: Reuters, AP, Financial Times, Bloomberg, BBC, Al Jazeera, major established newspapers, credible investigative organizations, academic publications, and established research institutions. Avoid random blogs, unsourced sites, anonymous claims, social media as primary evidence, AI-generated sources, and Wikipedia as primary evidence.
 
-Generate exactly ${poiCount} distinct POIs for this batch. No duplicates within this batch or against PREVIOUS POI METADATA. Each POI should preferably attack a different contradiction, commitment, legal issue, evidence point, implementation failure, policy issue, or financial issue.
+Generate exactly ${poiCount} distinct POIs for this batch. No duplicates within this batch or against PREVIOUS POI METADATA. Each POI must use a meaningfully distinct pressure point: vary targets, documents, events, policies, commitments, votes, contradictions, legal frameworks, implementation failures, investigations, findings, or historical evidence only where actually relevant to the user's agenda and discovered material. Do not generate paraphrases of the same issue.
 
 Important concepts may be emphasized with Markdown-style bold markers around short phrases only.
 
@@ -369,21 +378,21 @@ export async function recoverShortfall({ form, sliders, selectedTargets, targeti
   let packet = researchPacket;
   const recoveryLog = [];
   let recoveryResearchRounds = 0;
-  const maxAttempts = Math.min(8, Math.max(3, Math.ceil(poiCount / GENERATION_BATCH_SIZE) + 2));
+  const maxAttempts = Math.min(MAX_GENERATION_ATTEMPTS, Math.max(5, Math.ceil(poiCount / GENERATION_BATCH_SIZE) + 4));
   for (let level = 1; current.chits.length < poiCount && level <= maxAttempts; level += 1) {
     const remaining = poiCount - current.chits.length;
-    const analysis = analyzeRetention({ before: mission.chits, after: current.chits, requested: poiCount });
+    const analysis = analyzeRetention({ before: current.chits, after: current.chits, requested: poiCount });
     recoveryLog.push({ level, ...analysis, remaining });
     onProgress?.({ stage: 'RECOVERING GENERATION', detail: `${current.chits.length} / ${poiCount} valid POIs — recovering ${remaining} rejected or missing candidate(s).`, done: current.chits.length, total: poiCount });
-    if (level >= 2 && recoveryResearchRounds < MAX_RECOVERY_RESEARCH_ROUNDS && (analysis.evidenceFailures || analysis.duplicateCount || level >= 3)) {
+    if (packet?.needsSupplementalRecoveryResearch && level >= 2 && recoveryResearchRounds < MAX_RECOVERY_RESEARCH_ROUNDS && (analysis.evidenceFailures || analysis.duplicateCount || level >= 3)) {
       recoveryResearchRounds += 1;
       onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: `Recovery research round ${recoveryResearchRounds}/${MAX_RECOVERY_RESEARCH_ROUNDS}: reusing existing corpus and extracting only new URLs.`, done: current.chits.length, total: poiCount });
       const expansion = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, poiCount, researchState: packet?.researchState, onProgress });
       packet = { ...(packet || {}), ...expansion, sources: expansion.sources || [], retrievedSources: expansion.retrievedSources || [], failures: expansion.failures || [], researchState: expansion.researchState, recoveryExpansions: [...(packet?.recoveryExpansions || []), expansion.stats] };
     }
-    const askFor = Math.min(GENERATION_BATCH_SIZE, Math.ceil(remaining * Math.min(1.6, 1.15 + (analysis.duplicateCount + analysis.evidenceFailures + analysis.underProduced) / Math.max(25, poiCount))));
+    const askFor = remaining;
     const beforeCount = current.chits.length;
-    const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount: askFor, poiTypes, researchPacket: packet, batchNumber: level, totalBatches: maxAttempts, previousPoiMetadata: compactPoiMetadata(current.chits) }) + `\n\nRECOVERY INSTRUCTIONS: ${recoveryFocus(level, analysis)} Need ${remaining} more final POIs. Return up to ${askFor} candidate POIs; ChitForge will keep only defensible non-duplicates.`;
+    const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount: askFor, poiTypes, researchPacket: packet, batchNumber: level, totalBatches: maxAttempts, previousPoiMetadata: compactPoiMetadata(current.chits) }) + `\n\nRECOVERY INSTRUCTIONS: ${recoveryFocus(level, analysis)} Need exactly ${remaining} more final POIs. Return ${askFor} candidate POIs; ChitForge will keep only defensible non-duplicates.`;
     try {
       const response = await callGemini(form.apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA });
       const extra = await recoverMission({ apiKey: form.apiKey, text: response.text, ctx: { form, sliders, includeFollowUp, poiCount: askFor, targetingMode: `recovery-${level}`, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
