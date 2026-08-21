@@ -159,6 +159,9 @@ function discoveryTermsFromSources(sources = [], limit = 10) {
   return extractCompactTerms(sources.map((s) => `${s.title || ''}. ${s.snippet || ''}. ${s.domain || ''}`).join('\n'), limit);
 }
 
+function queryKey(query = '') { return normalizeDdgsQuery(query).toLowerCase(); }
+function limitQueries(queries, budget) { return [...new Map(queries.map((q) => [queryKey(q), q])).values()].filter((q) => q && q.length <= DDGS_SCHEDULING.queryMaxChars).slice(0, Math.max(1, budget)); }
+
 function expandResearchQueries({ form, selectedTargets = [], targetingMode, poiTypes = [], round = 0 }) {
   const sliders = { aggression: round >= 2 ? 65 : 35, controversy: round >= 4 ? 65 : 0, diplomacy: round % 2 ? 70 : 30 };
   const base = buildResearchQueries({ form, sliders, selectedTargets, targetingMode, poiTypes, queryBudget: getResearchQueryBudget(250) });
