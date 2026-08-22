@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { generateMission } from './generation.js';
+import { generateMission, stage1PortfolioAgenda } from './generation.js';
+import { ResearchJobStore } from './researchJobStore.js';
 
 const text = (obj) => ({ text: JSON.stringify(obj) });
 const makeQueries = (prefix, n) => ({ queries: Array.from({ length:n }, (_, i) => ({ query:`${prefix} query ${i + 1}` })) });
 
 const fakeGemini = async (_apiKey, prompt) => {
-  if (prompt.includes('Stage 0 Context Intelligence')) return text({ intelligence:{ agendaInterpretation:'Agenda meaning', committeeMandate:'Mandate', backgroundGuideSummary:'Guide summary', keyIssues:['Issue'], definitions:['Definition'], historicalContext:'History', mechanisms:['Mechanism'], treaties:['Treaty'], resolutions:['Resolution'], relevantInstitutions:['UN'], importantDates:['2025-01-01'], ambiguities:['Ambiguity'], researchPriorities:['Priority'], portfolioCountry:'France', freezeDate:null, userResearchNotes:{ label:'USER_PROVIDED_CONTEXT', text:'note' }, portfolioStance:'France stance' } });
+  if (prompt.includes('Stage 0 Context Intelligence')) return text({ intelligence:{ agendaInterpretation:'Agenda meaning', committeeMandate:'Mandate', backgroundGuideSummary:'Guide summary', keyIssues:['Issue'], definitions:['Definition'], historicalContext:'History', mechanisms:['Mechanism'], treaties:['Treaty'], resolutions:['Resolution'], relevantInstitutions:['UN'], importantDates:['2025-01-01'], ambiguities:['Ambiguity'], researchPriorities:['Priority'], portfolioCountry:'France', freezeDate:null, freezeDateAnalysis:'No freeze date supplied.', researchNotes:{ label:'USER_PROVIDED_CONTEXT', text:'note' }, portfolioStance:'France stance' } });
   if (prompt.includes('Stage 1 Portfolio + Agenda Intelligence') && prompt.includes('Return strict JSON')) return text(makeQueries('stage1', 6));
   if (prompt.includes('Stage 1 synthesis')) return text({ intelligence:{ agendaAnalysis:'Analysis', mandateLimitations:'Limit', portfolioPosition:'Portfolio position', portfolioObjectives:['Objective'], relevantActors:['Germany'], institutions:['UN'], mechanisms:['Mechanism'], policies:['Policy'], treaties:['Treaty'], resolutions:['Resolution'], disagreements:['Disagreement'], evidence:['Evidence'], researchGaps:['Gap'] } });
   if (prompt.includes('Stage 2 Target Discovery') && prompt.includes('Return strict JSON')) return text(makeQueries('stage2', 8));
@@ -53,3 +54,35 @@ await assert.rejects(
 );
 assert.equal(blockedProgress.some((e) => e.detail === '[STAGE 4 START]'), false, 'blocked run never reaches Stage 4');
 console.log('DDGS-unavailable stage gate test passed');
+
+// A delayed, malformed first response proves validation waits for Gemini and uses repair,
+// rather than validating a placeholder or allowing Stage 1 to race ahead.
+let stage0Attempts = 0;
+const lifecycle = [];
+const delayedRepairGemini = async (apiKey, prompt, options) => {
+  if (prompt.includes('Stage 0 Context Intelligence')) {
+    stage0Attempts += 1;
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    if (stage0Attempts === 1) return text({ intelligence:{ agendaInterpretation:'Agenda meaning' } });
+  }
+  return fakeGemini(apiKey, prompt, options);
+};
+const repairedMission = await generateMission({
+  form:{ committee:'UN', mandate:'Mandate', agenda:'Agenda', portfolio:'France', freezeDate:'', researchNotes:'note', backgroundGuideText:'guide text reaches stage zero', apiKey:'test' },
+  sliders:{ aggression:0, controversy:0, diplomacy:0, length:10 }, selectedTargets:[], targetingMode:'selected_global', includeFollowUp:false, poiCount:1,
+  modelSelection:{ callGeminiImpl:delayedRepairGemini }, search:fakeSearch, extract:fakeExtract,
+  onProgress:(event) => lifecycle.push(event.detail),
+});
+assert.equal(stage0Attempts, 2, 'invalid Stage 0 response is repaired with a second awaited Gemini call');
+assert.equal(repairedMission.chits.length, 1);
+assert(lifecycle.findIndex((detail) => detail === '[STAGE 0 COMPLETE]') < lifecycle.findIndex((detail) => detail.startsWith('[STAGE 1 START]')), 'Stage 1 begins only after the Stage 0 checkpoint is complete');
+assert(lifecycle.some((detail) => detail.includes('Retrying with structured repair')), 'parse/schema retry is explicit in runtime logs');
+
+const store = await ResearchJobStore.create();
+const job = await store.createJob({ test:true });
+await assert.rejects(
+  stage1PortfolioAgenda({ form:{ apiKey:'test' }, masterContext:{}, poiCount:1, modelSelection:{ callGeminiImpl:fakeGemini }, onProgress:()=>{}, store, jobId:job.id }),
+  /stage_0 checkpoint is not complete/,
+  'Stage 1 refuses to start without its persisted Stage 0 checkpoint',
+);
+console.log('await/repair and persisted stage-gate tests passed');

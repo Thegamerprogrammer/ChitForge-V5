@@ -4,6 +4,7 @@ import { CHITFORGE_RESPONSE_SCHEMA, FOLLOW_UP_RESPONSE_SCHEMA, FACT_CHECK_RESPON
 const API_VERSION = 'v1beta';
 const BASE_URL = 'https://generativelanguage.googleapis.com';
 const cache = new Map();
+const isDev = Boolean(import.meta.env?.DEV);
 
 export class GeminiError extends Error {
   constructor(message, { category, status, reason, diagnostic, cause, fallbackLog, model, rawText } = {}) {
@@ -27,16 +28,19 @@ function userMessageForStatus(status, reason) {
   return reason ? `Gemini request failed (${status}): ${reason}` : `Gemini request failed with HTTP ${status}.`;
 }
 async function parseErrorResponse(res) { try { const p = await res.json(); return [p.error?.message, p.error?.status, p.error?.details?.find?.((d) => d.reason)?.reason].filter(Boolean).join(' — ') || res.statusText; } catch { return (await res.text().catch(() => '')).slice(0, 240) || res.statusText; } }
-function debugDiagnostic({ status, reason, category, model }) { if (!import.meta.env.DEV) return undefined; return [`GEMINI ERROR`, `MODEL: ${model || 'n/a'}`, `HTTP STATUS: ${status || 'n/a'}`, `FAILURE STAGE: ${category}`, `REASON: ${reason || 'n/a'}`].join('\n'); }
+function debugDiagnostic({ status, reason, category, model, endpoint: url, cause }) { if (!isDev) return undefined; return [`GEMINI ERROR`, `MODEL: ${model || 'n/a'}`, `ENDPOINT: ${url || 'n/a'}`, 'AUTH: present (redacted)', `HTTP STATUS: ${status || 'n/a'}`, `FAILURE STAGE: ${category}`, `REASON: ${reason || 'n/a'}`, `NETWORK CAUSE: ${cause || 'n/a'}`].join('\n'); }
+function networkReason(error) { const cause=error?.cause; const code=cause?.code || cause?.errors?.[0]?.code; return code ? `${error.message || error} (${code})` : String(error?.message || error); }
 
 export async function discoverGeminiModels(apiKey, { force = false } = {}) {
   if (!apiKey?.trim()) throw new GeminiError('Missing Gemini API key. Enter your key and try again.', { category: 'missing-api-key' });
   const key = cacheKey(apiKey);
   if (!force && cache.has(key)) return cache.get(key);
-  const res = await fetch(listEndpoint(), { headers: { 'x-goog-api-key': apiKey } });
+  let res;
+  try { res = await fetch(listEndpoint(), { headers: { 'x-goog-api-key': apiKey } }); }
+  catch (error) { const reason=networkReason(error); throw new GeminiError('Could not reach Gemini model discovery endpoint.', { category:'network', reason, diagnostic:debugDiagnostic({ category:'network', endpoint:listEndpoint(), cause:reason }) }); }
   if (!res.ok) {
     const reason = await parseErrorResponse(res); const category = (res.status === 401 || res.status === 403 || /api[_ ]?key|key not valid|API_KEY_INVALID/i.test(reason)) ? 'invalid-api-key' : 'model-discovery';
-    throw new GeminiError(category === 'invalid-api-key' ? 'Your Gemini API key was rejected. Check the key and API access.' : 'Could not retrieve Gemini model availability.', { category, status: res.status, reason, diagnostic: debugDiagnostic({ status: res.status, reason, category }) });
+    throw new GeminiError(category === 'invalid-api-key' ? 'Your Gemini API key was rejected. Check the key and API access.' : 'Could not retrieve Gemini model availability.', { category, status: res.status, reason, diagnostic: debugDiagnostic({ status: res.status, reason, category, endpoint:listEndpoint() }) });
   }
   const payload = await res.json();
   const models = rankModels((payload.models || []).map((m) => classifyDiscoveredModel(m)));
@@ -56,14 +60,17 @@ function buildBody(prompt, schema, model, { nativeJson = true, attachments = [] 
 async function rawGenerate(apiKey, model, prompt, schema, { timeoutMs = 70000, nativeJson = true, attachments = [] } = {}) {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(endpoint(apiKey, model.id), { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }, signal: controller.signal, body: JSON.stringify(buildBody(prompt, schema, model, { nativeJson, attachments })) });
-    if (!res.ok) { const reason = await parseErrorResponse(res); const category = (res.status === 401 || res.status === 403 || /api[_ ]?key|key not valid|API_KEY_INVALID/i.test(reason)) ? 'invalid-api-key' : res.status === 404 ? 'model-unavailable' : [429, 500, 503].includes(res.status) ? 'transient-model-failure' : `http-${res.status}`; throw new GeminiError(userMessageForStatus(res.status, reason), { category, status: res.status, reason, model: model.displayName }); }
-    const data = await res.json();
+    const url=endpoint(apiKey, model.id);
+    console.info(`[GEMINI] REQUEST START model=${model.id} endpoint=${url.replace(/\?.*/, '')} auth=present`);
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }, signal: controller.signal, body: JSON.stringify(buildBody(prompt, schema, model, { nativeJson, attachments })) });
+    console.info(`[GEMINI] HTTP STATUS=${res.status} model=${model.id}`);
+    if (!res.ok) { const reason = await parseErrorResponse(res); const category = (res.status === 401 || res.status === 403 || /api[_ ]?key|key not valid|API_KEY_INVALID/i.test(reason)) ? 'invalid-api-key' : res.status === 404 ? 'model-unavailable' : [429, 500, 503].includes(res.status) ? 'transient-model-failure' : `http-${res.status}`; throw new GeminiError(userMessageForStatus(res.status, reason), { category, status: res.status, reason, model: model.displayName, diagnostic:debugDiagnostic({ status:res.status, reason, category, model:model.id, endpoint:url }) }); }
+    const raw=await res.text(); console.info(`[GEMINI] RESPONSE BYTES=${raw.length} model=${model.id}`); const data=JSON.parse(raw); console.info('[GEMINI] JSON PARSE=success');
     if (data.promptFeedback?.blockReason) throw new GeminiError(`Gemini blocked the request for safety reasons: ${data.promptFeedback.blockReason}.`, { category: 'safety-filter', reason: data.promptFeedback.blockReason, model: model.displayName });
     const text = extractGeminiText(data).trim();
-    if (!text) throw new GeminiError('Gemini returned an empty response. Try generating again.', { category: 'empty-response', model: model.displayName, diagnostic: import.meta.env.DEV ? `MODEL: ${model.displayName}\nHTTP STATUS: ${res.status}\nRAW RESPONSE LENGTH: ${JSON.stringify(data).length}\nEXTRACTED TEXT LENGTH: 0` : undefined });
+    if (!text) throw new GeminiError('Gemini returned an empty response. Try generating again.', { category: 'empty-response', model: model.displayName, diagnostic: isDev ? `MODEL: ${model.displayName}\nHTTP STATUS: ${res.status}\nRAW RESPONSE LENGTH: ${JSON.stringify(data).length}\nEXTRACTED TEXT LENGTH: 0` : undefined });
     return text;
-  } catch (error) { if (error instanceof GeminiError) throw error; if (error.name === 'AbortError') throw new GeminiError('Request timed out.', { category: 'timeout', cause: error, model: model.displayName }); throw new GeminiError('Could not reach Gemini.', { category: 'network', cause: error, model: model.displayName }); } finally { clearTimeout(timer); }
+  } catch (error) { if (error instanceof GeminiError) throw error; if (error.name === 'AbortError') throw new GeminiError('Request timed out.', { category: 'timeout', cause: error, model: model.displayName }); const reason=networkReason(error); throw new GeminiError('Could not reach Gemini.', { category: 'network', reason, cause: error, model: model.displayName, diagnostic:debugDiagnostic({ category:'network', model:model.id, endpoint:endpoint(apiKey, model.id), cause:reason }) }); } finally { clearTimeout(timer); }
 }
 
 export async function refreshModelCapabilities(apiKey, { force = true } = {}) { return discoverGeminiModels(apiKey, { force }); }

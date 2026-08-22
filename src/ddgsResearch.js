@@ -28,18 +28,22 @@ export async function retrieveQueries(queries, { controversy=0, stage, onProgres
   let completed=0;
   for (let b=0; b<batches.length; b+=1) {
     const batch=batches[b];
+    console.info(`[Stage ${stage}][DDGS] batch ${b+1}/${batches.length || 1} START queries ${completed + 1}-${completed + batch.length}`);
     await store?.put('diagnostics', { id:`${jobId}_stage_${stage}_ddgs_batch_${b+1}_start`, jobId, stage:`stage_${stage}`, message:`[STAGE ${stage} DDGS BATCH ${b+1}/${batches.length || 1}]`, batch:b+1, batchTotal:batches.length || 1 });
     const rows=await pooled(batch, async(queryRecord, index)=>{ const kind=retrievalKind(stage, completed + index, controversy); const response=await search(typeof queryRecord==='string' ? queryRecord : queryRecord.query, kind); const log={ id:`${batchPrefix}_search_${String(completed+index+1).padStart(3,'0')}`, queryId:queryRecord.id, query:typeof queryRecord==='string'?queryRecord:queryRecord.query, stage:`stage_${stage}`, batchId:`${batchPrefix}_ddgs_batch_${b+1}`, searchType:kind, backend:'auto', resultCount:response.results.length, duration:response.duration, success:!response.error, error:response.error || '' }; if (response.error) diagnostics.failed+=1; else if (!response.results.length) diagnostics.empty+=1; else diagnostics.successful+=1; logs.push(log); return normalizeResults(response.results, queryRecord, kind, { stage:`stage_${stage}`, batchId:log.batchId, offset:allSources.length + index*10 }); }, 6);
     completed += batch.length;
     const flat=rows.flat(); allSources.push(...flat);
     await store?.putBatch('ddgsBatches', jobId, `stage_${stage}`, `${batchPrefix}_ddgs_batch_${b+1}`, flat, { logs:logs.slice(), completed, total:queries.length });
-    onProgress?.({ stage:`stage_${stage}`, phase:'ddgs_retrieval', completed, done:completed, total:queries.length || 1, batch:b+1, batchTotal:batches.length || 1, detail:`Stage ${stage} — DDGS search ${completed}/${queries.length}.` });
+    const event={ stage:`stage_${stage}`, phase:'ddgs_retrieval', completed, done:completed, total:queries.length || 1, batch:b+1, batchTotal:batches.length || 1, detail:`[Stage ${stage}][DDGS] batch ${b+1}/${batches.length || 1} COMPLETE: completed=${completed} successful=${diagnostics.successful} empty=${diagnostics.empty} failed=${diagnostics.failed}` };
+    await store?.putProgress(jobId, event); onProgress?.(event);
+    console.info(event.detail);
   }
   const unique=rankAndCapSources(allSources.map((s)=>({ ...s, freezeDate, ...freezeValidation({ ...s, freezeDate }) })));
   const limit=Math.min(unique.length, Math.max(25, Math.min(unique.length, queries.length * 2)));
   const extracted=await pooled(unique.slice(0, limit), async(source)=>{ const page=await extract(source.url); if (page.content) diagnostics.extracted+=1; return { ...source, extractedText:page.content, extractionError:page.error }; }, 5);
   const retained=rankAndCapSources([...extracted, ...unique.slice(limit)]); diagnostics.usableAfterFreeze=retained.filter((s)=>s.usable).length;
   await store?.putBatch('sources', jobId, `stage_${stage}`, `${batchPrefix}_sources`, retained, { diagnostics });
+  console.info(`[Stage ${stage}][DDGS] COMPLETE usableSources=${diagnostics.usableAfterFreeze} extracted=${diagnostics.extracted}`);
   return { sources:retained, diagnostics, logs };
 }
 export function newsShare(controversy) { if (controversy <= 30) return .2; if (controversy <= 60) return .5; if (controversy <= 80) return .7; return .85; }
