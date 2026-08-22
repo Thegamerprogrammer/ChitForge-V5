@@ -1,34 +1,31 @@
 import assert from 'node:assert/strict';
-import { buildMissionPrompt } from './generation.js';
-import { buildResearchQueries, deriveAutomaticTargetCandidates } from './ddgsResearch.js';
+import { allocateActorQueries, canonicalUrl, clusterIncidents, deduplicateSources, freezeValidation, newsShare, pooled, queryBudget, retrieveQueries, targetValue } from './ddgsResearch.js';
+import { resolveCountry, searchCountries } from './countrySearch.js';
 
-const form = {
-  committee: 'UNSC',
-  agenda: 'Protection of civilians and humanitarian access in Ukraine',
-  portfolio: 'Indonesia',
-  researchNotes: 'Focus on voting contradictions and treaty obligations involving Russia and China.',
-  freezeDate: '2024-12-31',
-  backgroundGuideName: 'bg-ukraine.md',
-  backgroundGuideText: 'The Background Guide discusses Russia, Ukraine, China, humanitarian access, civilian protection, and Security Council veto politics.',
-  backgroundGuide: { name: 'bg-ukraine.md', mimeType: 'text/markdown', size: 154, data: Buffer.from('guide').toString('base64'), text: 'Russia Ukraine China humanitarian access civilian protection' },
-};
-const sliders = { aggression: 75, controversy: 85, diplomacy: 35, length: 45 };
-const selectedTargets = [];
-const queries = buildResearchQueries({ form, sliders, selectedTargets, targetingMode: 'selected_global', poiTypes: ['LEGAL TRAP', 'VOTING CONTRADICTION'] });
-assert(queries.some((q) => q.includes(form.agenda)), 'agenda is used in DDGS planning');
-assert(queries.some((q) => q.includes(form.portfolio)), 'portfolio is used in DDGS planning');
-assert(queries.some((q) => q.includes('before 2024-12-31')), 'Freeze Date is used in DDGS planning');
-assert(queries.some((q) => q.includes('voting contradictions')), 'Research Notes are used in DDGS planning');
-assert(queries.some((q) => q.includes('bg-ukraine.md')), 'Background Guide artifact name is used in DDGS planning');
-assert(queries.some((q) => /foreign policy doctrine|foreign policy/.test(q)), 'portfolio foreign policy research is planned');
-const sources = [
-  { title: 'Russia blocks Security Council action on Ukraine humanitarian access', snippet: 'Russia and Ukraine civilian protection obligations', domain: 'un.org' },
-  { title: 'China voting record on Ukraine resolutions', snippet: 'China abstentions and policy contradiction', domain: 'digitallibrary.un.org' },
-];
-const candidates = deriveAutomaticTargetCandidates({ form, sources, selectedTargets });
-assert(candidates.some((c) => c.iso === 'RUS'), 'automatic target candidates include agenda-relevant Russia');
-assert(candidates.some((c) => c.iso === 'CHN'), 'automatic target candidates include agenda-relevant China');
-assert(!candidates.some((c) => c.name === 'Indonesia' || c.iso === 'IDN'), 'portfolio is excluded as an opposition target');
-const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode: 'selected_global', includeFollowUp: true, poiCount: 2, poiTypes: ['LEGAL TRAP'], researchPacket: { queries, sources, retrievedSources: [], bangUrls: [], automaticTargetCandidates: candidates, stats: {} } });
-for (const expected of ['BACKGROUND GUIDE ATTACHMENT', 'AUXILIARY ONLY', 'DDGS results are research references and discovery starting points, not the boundary', 'Before POI generation, explicitly analyze the portfolio country', 'Perform agenda-specific antiprep/dirt-prep', 'Freeze Date is strict', 'Never generate an opposition POI against the user']) assert(prompt.includes(expected), `prompt contains ${expected}`);
-console.log('research planning dry-run passed');
+for (const count of [1, 10, 20, 50, 100]) { const budget = queryBudget(count); assert.equal(budget.stage1, Math.round(count * 7.5)); assert.equal(budget.stage2, count * 10); }
+assert.deepEqual(queryBudget(20), { stage1: 150, stage2: 200 });
+assert.deepEqual(queryBudget(100), { stage1: 750, stage2: 1000 });
+assert.equal(newsShare(0), .2); assert.equal(newsShare(45), .5); assert.equal(newsShare(70), .7); assert.equal(newsShare(100), .85);
+assert.equal(canonicalUrl('https://www.un.org/a/?utm_source=x#part'), 'https://un.org/a');
+assert.equal(deduplicateSources([{ canonicalUrl:'https://x.test' }, { canonicalUrl:'https://x.test' }]).length, 1);
+assert.deepEqual(freezeValidation({ publicationDate:'2026-02-01', freezeDate:'2026-03-01' }), { freezeStatus:'PRE_FREEZE', usable:true });
+assert.deepEqual(freezeValidation({ publicationDate:'2026-04-01', eventDate:'2026-02-01', informationAvailabilityDate:'2026-02-15', freezeDate:'2026-03-01' }), { freezeStatus:'POST_FREEZE_PRE_FREEZE_EVENT', usable:true });
+assert.deepEqual(freezeValidation({ publicationDate:'2026-04-01', eventDate:'2026-04-01', informationAvailabilityDate:'2026-04-01', freezeDate:'2026-03-01' }), { freezeStatus:'POST_FREEZE_NEW_EVENT', usable:false });
+const clusters = clusterIncidents([{ country:'A', claim:'Court found the same implementation failure', sourceIds:['research_1'] }, { country:'A', claim:'Implementation failure found by court same', sourceIds:['research_2'] }]);
+assert.equal(clusters.length, 1, 'incident clustering combines corroboration');
+const allocated = allocateActorQueries([{ relevance:90 }, { relevance:10 }, { relevance:1 }], 100);
+assert.equal(allocated[0].queryAllocation > 50, true);
+assert.equal(allocated.reduce((sum, actor) => sum + actor.queryAllocation, 0), 100, 'actor allocation remains the total stage budget');
+assert.deepEqual(allocateActorQueries([], 100), []);
+assert.equal(targetValue({ agendaRelevance:100, evidenceStrength:100, legalAccountability:100, controversyFit:100, recency:100, sourceQuality:100, corroboration:100 }), 100);
+assert.equal(resolveCountry(' People\'s Republic of China ').iso, 'CHN');
+assert.equal(resolveCountry('USA').name, 'United States');
+assert(searchCountries('united stat').some((country) => country.iso === 'USA'), 'partial country search returns an autocomplete match');
+const indexed = await pooled(['first', 'second', 'third'], async (value, index) => { await new Promise((resolve) => setTimeout(resolve, (2 - index) * 3)); return `${index}:${value}`; }, 3);
+assert.deepEqual(indexed, ['0:first', '1:second', '2:third'], 'pooled work retains stable input order and indexes');
+const progress = [];
+const retrieval = await retrieveQueries(['a', 'b', 'c'], { stage:2, controversy:70, extractionBudget:3, onProgress:(event) => progress.push(event), search:async (query) => query === 'b' ? { results:[], error:'timeout' } : { results:[{ href:`https://example.test/${query}`, title:query }] }, extract:async () => ({ content:'page', error:null }) });
+assert.deepEqual(progress.map((event) => event.done), [1, 2, 3], 'progress advances once per completed attempt without NaN');
+assert(progress.every((event) => Number.isFinite(event.done) && event.total === 3), 'progress counters are finite');
+assert.deepEqual(retrieval.diagnostics, { attempted:3, successful:2, failed:1, empty:0, extracted:2, usableAfterFreeze:0 });
+console.log('four-stage research planning tests passed');
