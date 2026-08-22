@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test:parser": "node src/responseParser.test.mjs",
-    "test:research-planning": "node src/researchPlanning.test.mjs"
+    "test:research-planning": "node src/researchPlanning.test.mjs",
+    "test:research-pipeline": "node src/researchPipeline.integration.test.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.16.0",
