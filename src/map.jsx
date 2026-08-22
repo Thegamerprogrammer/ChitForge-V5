@@ -2,8 +2,8 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { geoCentroid, geoNaturalEarth1, geoPath } from 'd3-geo';
 import { feature } from 'topojson-client';
 import world from 'world-atlas/countries-50m.json';
-import countryList from 'world-countries';
 
+import countryList from 'world-countries';
 const numericToCountry = new Map(countryList.filter((c) => c.ccn3).map((c) => [c.ccn3, { iso: c.cca3, name: c.name.common }]));
 const aliases = new Map([
   ['United States of America', { iso: 'USA', name: 'United States' }],
@@ -46,7 +46,7 @@ export function WorldMap({ selected, setSelected, portfolio }) {
   }, []);
   const toggle = (country) => {
     if (dragRef.current.moved) return;
-    setSelected(selectedIso.has(country.iso) ? selected.filter((c) => c.iso !== country.iso) : [...selected, { iso: country.iso, name: country.name }]);
+    setSelected(selectedIso.has(country.iso) ? selected.filter((c) => c.iso !== country.iso) : [...selected, { iso: country.iso, name: country.name, source: 'USER_SELECTED_OPPOSITION' }]);
   };
   const moveTooltip = useCallback((event, country) => {
     const { offsetX, offsetY } = event.nativeEvent;

@@ -16,7 +16,7 @@ export function validateMissionInputs({ agenda, portfolio, apiKey, poiCount }) {
   if (!agenda.trim()) return 'Enter an agenda/topic.';
   if (!portfolio.trim()) return 'Enter your portfolio/country.';
   if (!apiKey.trim()) return 'Missing Gemini API key. Enter your key and try again.';
-  if (!Number.isInteger(poiCount) || poiCount < 1 || poiCount > 20) return 'Choose a POI count from 1 to 20.';
+  if (!Number.isInteger(poiCount) || poiCount < 1 || poiCount > 100) return 'Choose a POI count from 1 to 100.';
   return '';
 }
 

@@ -87,6 +87,12 @@ input:focus, textarea:focus, select:focus { border-color: rgba(157,201,255,.62);
 .check input[type=checkbox]:checked { background: rgba(157,201,255,.26); }
 .check input[type=checkbox]:checked::after { transform: translateX(20px); }
 .mapPanel { min-height: 620px; }
+.countrySearch { position: relative; z-index: 5; display: grid; gap: 7px; margin: 0 0 14px; }
+.countrySearch label { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-tertiary); }
+.countrySuggestions { position: absolute; top: 70px; left: 0; right: 0; z-index: 8; overflow: hidden; border: 1px solid rgba(157,201,255,.34); border-radius: 14px; background: rgba(13,23,34,.98); box-shadow: 0 18px 42px rgba(0,0,0,.35); }
+.countrySuggestions button { width: 100%; min-height: 38px; display: flex; justify-content: space-between; border: 0; border-radius: 0; background: transparent; text-align: left; }
+.countrySuggestions button.active, .countrySuggestions button:hover { background: rgba(157,201,255,.18); }
+.countrySuggestions p, .selectedCountryStatus { margin: 0; padding: 8px 10px; font-size: 12px; color: var(--text-tertiary); }
 .mapWrap { min-height: 540px; padding: 18px; background: radial-gradient(circle at 50% 45%, rgba(157,201,255,.13), transparent 42%), rgba(255,255,255,.04); }
 .mapTools { position: absolute; right: 18px; top: 18px; z-index: 3; display: flex; gap: 8px; flex-wrap: wrap; }
 .mapTools button { padding: 8px 11px; }
@@ -142,7 +148,7 @@ a { color: #cfe5ff; }
   button, input, textarea, select, .slider, .check input[type=checkbox] { backdrop-filter: blur(14px) saturate(1.1); -webkit-backdrop-filter: blur(14px) saturate(1.1); }
 }
 @media (max-width: 1180px) { .layout { grid-template-columns: minmax(300px, 390px) 1fr; } .queue { grid-column: 1 / -1; } .stageList { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 760px) { :root { --glass-radius: 24px; } .hero, .arrayHeader { display: block; } .hero, .layout, .intel, .poiWindow { margin-left: 14px; margin-right: 14px; padding-left: 16px; padding-right: 16px; } .layout { grid-template-columns: 1fr; padding: 0 0 24px; } .heroActions, .actions { justify-content: flex-start; } .mapTools { position: static; margin-bottom: 10px; } .mapPanel, .mapWrap { min-height: auto; } .typeGrid { grid-template-columns: 1fr 1fr; } .stageList { grid-template-columns: 1fr; } blockquote { font-size: 18px; } }
+@media (max-width: 760px) { :root { --glass-radius: 24px; } .hero, .arrayHeader { display: block; } .hero, .layout, .intel, .poiWindow { margin-left: 14px; margin-right: 14px; padding-left: 16px; padding-right: 16px; } .layout { grid-template-columns: 1fr; padding: 0 0 24px; } .heroActions, .actions { justify-content: flex-start; } .mapTools { position: static; margin-bottom: 10px; } .mapPanel, .mapWrap { min-height: auto; } .countrySuggestions { position: static; } .typeGrid { grid-template-columns: 1fr 1fr; } .stageList { grid-template-columns: 1fr; } blockquote { font-size: 18px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .001ms !important; } }
 
 /* Kube-inspired component refinement: visible environment + refractive/specular controls */
