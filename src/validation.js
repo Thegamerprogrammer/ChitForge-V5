@@ -91,7 +91,7 @@ function flattenChits(parsed) {
 }
 
 export function normalizeChit(chit, ctx) {
-  const evidence = Array.isArray(chit.evidence) && chit.evidence.length ? chit.evidence.map((e) => ({ ...e, url: e.url || e.source_url || '', title: e.title || e.source_name || e.source || 'MANUAL VERIFICATION', claim: e.claim || 'MANUAL VERIFICATION' })) : [{ title: 'Source verification required', organization: 'MANUAL VERIFICATION', date: 'MANUAL VERIFICATION', url: '', sourceClassification: 'OTHER', claim: 'No source was provided for this claim.' }];
+  const evidence = Array.isArray(chit.evidence) && chit.evidence.length ? chit.evidence.map((e) => ({ ...e, url: e.url || e.source_url || e.sourceUrl || '', title: e.title || e.source_name || e.sourceName || e.source || 'MANUAL VERIFICATION', claim: e.claim || e.claimSupported || 'MANUAL VERIFICATION', sourceName: e.sourceName || e.source_name || e.title || e.source || '', publicationDate: e.publicationDate || e.publication_date || e.date || '', ddgsQuery: e.ddgsQuery || e.query || '', bangUrl: e.bangUrl || e.duckDuckGoBangUrl || '', canonicalUrl: e.canonicalUrl || e.canonical_url || e.url || e.source_url || '' })) : [{ title: 'Source verification required', organization: 'MANUAL VERIFICATION', date: 'MANUAL VERIFICATION', url: '', sourceClassification: 'OTHER', claim: 'No source was provided for this claim.' }];
   const evidenceStrength = evidence.some((e) => e.url && /PRIMARY/i.test(e.sourceClassification || '')) ? 85 : evidence.some((e) => e.url && !/wikipedia/i.test(e.url)) ? 65 : 15;
   const legalTypes = Array.isArray(chit.legalTacticalTypes) && chit.legalTacticalTypes.length ? chit.legalTacticalTypes : [normalizeClassification(chit.classification || 'AUTO')];
   const wordCount = countWords(chit.poi || '');
@@ -159,7 +159,11 @@ function buildValidation(chit, supplied) {
   });
 }
 
-export function validateMissionResponse(mission, { targetingMode, poiCount }) {
+function normCountry(value = '') { return String(value).trim().toLowerCase().replace(/^(the|republic of|state of|kingdom of)\s+/, ''); }
+function sameCountry(a, b) { const left = normCountry(a); const right = normCountry(b); return !!left && !!right && (left === right || left.includes(right) || right.includes(left)); }
+function isAfterFreezeDate(dateValue, freezeDate) { if (!freezeDate || !dateValue) return false; const pub = Date.parse(dateValue); const freeze = Date.parse(freezeDate); return Number.isFinite(pub) && Number.isFinite(freeze) && pub > freeze; }
+
+export function validateMissionResponse(mission, { targetingMode, poiCount, portfolio = '', freezeDate = '' }) {
   const problems = [];
   if (!mission.portfolioProfile?.summary || /MANUAL VERIFICATION/i.test(mission.portfolioProfile.summary)) problems.push('Portfolio intelligence profile is missing or unverifiable');
   if (targetingMode !== 'manual' && !mission.chits.length) problems.push('Automatic/hybrid zero-target generation returned no chits');
@@ -168,11 +172,16 @@ export function validateMissionResponse(mission, { targetingMode, poiCount }) {
   const duplicateCount = findDuplicatePoiIndexes(mission.chits).length;
   if (duplicateCount) problems.push(`${duplicateCount} duplicate POI argument(s) detected`);
   mission.chits.forEach((chit) => {
+    if (sameCountry(chit.target, portfolio) || sameCountry(chit.targetIso, portfolio)) problems.push(`Own portfolio cannot be targeted: ${chit.target}`);
     if (!chit.poi) problems.push(`Missing POI for ${chit.target}`);
     if (ceremonial.test(stripMarkdown(chit.poi).trim())) problems.push(`Ceremonial opening for ${chit.target}`);
     if (!chit.evidence?.some((e) => e.url && /^https?:\/\//i.test(e.url) && !/wikipedia/i.test(e.url))) problems.push(`Missing credible source URL for ${chit.target}`);
     if (!chit.legalTacticalTypes?.length) problems.push(`Missing legal/tactical classification for ${chit.target}`);
     if (!chit.pressurePoint?.portfolioPosition) problems.push(`Missing portfolio alignment for ${chit.target}`);
+    (chit.evidence || []).forEach((e) => {
+      if (e.ddgsQuery && !e.bangUrl) problems.push(`Missing DDGS bang provenance for ${chit.target}`);
+      if (isAfterFreezeDate(e.eventDate || e.informationDate, freezeDate)) problems.push(`Post-freeze-date evidence for ${chit.target}`);
+    });
   });
   return problems.slice(0, 10);
 }

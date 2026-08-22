@@ -22,7 +22,7 @@ const MemoWorldMap = React.memo(WorldMap);
 
 function App() {
   const stored = useMemo(() => loadStoredKey(), []);
-  const [form, setForm] = useState({ committee: '', agenda: '', portfolio: '', apiKey: stored.key, rememberKey: stored.rememberKey });
+  const [form, setForm] = useState({ committee: '', agenda: '', portfolio: '', freezeDate: '', researchNotes: '', backgroundGuideName: '', backgroundGuideText: '', backgroundGuide: null, apiKey: stored.key, rememberKey: stored.rememberKey });
   const [showKey, setShowKey] = useState(false);
   const [sliders, setSliders] = useState(defaultSliders);
   const [poiCount, setPoiCount] = useState(5);
@@ -41,6 +41,7 @@ function App() {
   const [manualModelId, setManualModelId] = useState('');
   const [modelCatalog, setModelCatalog] = useState(null);
   const [modelInfo, setModelInfo] = useState(null);
+  const [researchPacket, setResearchPacket] = useState(null);
   const [modelLoading, setModelLoading] = useState(false);
   const [customBackground, setCustomBackground] = useState('');
   const [uiOpacity, setUiOpacity] = useState(100);
@@ -93,6 +94,7 @@ function App() {
       setRecommendations(result.recommendedTargets || []);
       setChits(result.chits);
       setModelInfo(result.modelInfo || null);
+      setResearchPacket(result.researchPacket || null);
       if (result.chits.length < poiCount && mode !== 'selected_only') setError({ message: `${result.chits.length} / ${poiCount} POIs generated. Gemini did not return enough distinct, defensible POIs after retry attempts. No duplicates were inserted.` });
       if (!result.chits.length) setError({ message: mode === 'selected_only' && !selected.length ? 'Selected Targets Only needs at least one selected target. Zero selected targets is valid in Selected + Global Research mode.' : 'No defensible targets were discovered. Try Selected + Global Research or refine the agenda.' });
     } catch (err) {
@@ -145,6 +147,10 @@ function App() {
         <label>Committee<input value={form.committee} onChange={(e) => updateForm('committee', e.target.value)} placeholder="e.g. ECOFIN" /></label>
         <label>Agenda / Topic<textarea value={form.agenda} onChange={(e) => updateForm('agenda', e.target.value)} placeholder="e.g. Sovereign debt restructuring and development finance" /></label>
         <label>Portfolio / Country<input value={form.portfolio} onChange={(e) => updateForm('portfolio', e.target.value)} placeholder="e.g. Indonesia or IDN" /></label>
+        <label>Freeze Date<input type="date" value={form.freezeDate} onChange={(e) => updateForm('freezeDate', e.target.value)} /></label>
+        <label>Research Notes<textarea value={form.researchNotes} onChange={(e) => updateForm('researchNotes', e.target.value)} placeholder="Optional priorities, arguments to test, sources to prefer, or countries to watch." /></label>
+        <label className="backgroundPicker">Background Guide<input type="file" accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,text/*,application/pdf" onChange={async (e) => { const file = e.target.files?.[0]; if (!file) return; const dataUrl = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || '')); reader.onerror = reject; reader.readAsDataURL(file); }).catch(() => ''); const text = await file.text().catch(() => ''); const data = dataUrl.includes(',') ? dataUrl.split(',').pop() : ''; setForm((current) => ({ ...current, backgroundGuideName: file.name, backgroundGuideText: text, backgroundGuide: { name: file.name, mimeType: file.type || 'application/octet-stream', size: file.size, lastModified: file.lastModified, data, text } })); }} /></label>
+        {form.backgroundGuideName && <p className="muted">Attached Background Guide: {form.backgroundGuideName}</p>}
         <label>Gemini API Key<div className="keyRow"><input type={showKey ? 'text' : 'password'} autoComplete="off" value={form.apiKey} onChange={(e) => updateForm('apiKey', e.target.value)} placeholder="Stored for this session by default" /><button type="button" onClick={() => setShowKey(!showKey)}>{showKey ? 'Hide' : 'Show'}</button></div></label>
         <div className="row"><label className="check switchField"><input type="checkbox" checked={form.rememberKey} onChange={(e) => updateForm('rememberKey', e.target.checked)} /><span className="glassSwitch" aria-hidden="true"><i /></span><span>Save beyond this session</span></label><button onClick={() => { clearStoredKey(); setForm({ ...form, apiKey: '', rememberKey: false }); }}>Clear Key</button></div>
 
@@ -181,7 +187,7 @@ function App() {
         {error && <ErrorBox error={error} />}
       </section>
       <section className="panel mapPanel"><h2>Real World Target Map</h2><MemoWorldMap selected={selected} setSelected={setSelected} portfolio={form.portfolio} /></section>
-      <aside className="panel queue glass-sidebar"><details className="settingsPanel" open><summary>Generation Settings</summary><div className="settingsGrid"><span>POI Count<b>{poiCount}</b></span><span>POI Type<b>{poiTypes.join(', ')}</b></span><span>Target Mode<b>{mode}</b></span><span>Follow-ups<b>{includeFollowUp ? 'ON' : 'OFF'}</b></span><span>Model<b>{modelInfo?.model?.displayName || modelMode}</b></span><span>Aggression<b>{sliders.aggression}</b></span><span>Controversy<b>{sliders.controversy}</b></span><span>Diplomacy<b>{sliders.diplomacy}</b></span><span>Length<b>{sliders.length}</b></span></div><GlassRange name="opacity" value={uiOpacity} onCommit={commitOpacity} /></details><h2>Selected Targets</h2>{selected.length ? selected.map((c) => <button key={c.iso} className="pill" onClick={() => setSelected(selected.filter((x) => x.iso !== c.iso))}>{c.name}<span>{c.iso}</span>×</button>) : <p className="muted">No manual targets selected. Auto-discovery can generate anyway.</p>}<button onClick={() => setSelected([])}>Clear selections</button>{recommendations.length > 0 && <><h2>AI Recommended Targets</h2>{recommendations.map((target) => <div className="recommendation" key={`${target.name}-${target.reason}`}><b>{target.name}</b><small>{target.reason}</small></div>)}</>}{(busy || status) && <ProgressPanel status={status} poiCount={poiCount} activity={activity} />}</aside>
+      <aside className="panel queue glass-sidebar"><details className="settingsPanel" open><summary>Generation Settings</summary><div className="settingsGrid"><span>POI Count<b>{poiCount}</b></span><span>POI Type<b>{poiTypes.join(', ')}</b></span><span>Target Mode<b>{mode}</b></span><span>Follow-ups<b>{includeFollowUp ? 'ON' : 'OFF'}</b></span><span>Model<b>{modelInfo?.model?.displayName || modelMode}</b></span><span>Aggression<b>{sliders.aggression}</b></span><span>Controversy<b>{sliders.controversy}</b></span><span>Diplomacy<b>{sliders.diplomacy}</b></span><span>Length<b>{sliders.length}</b></span><span>Freeze Date<b>{form.freezeDate || 'None'}</b></span><span>DDGS URLs<b>{researchPacket?.stats?.retainedUrls ?? 0}</b></span></div><GlassRange name="opacity" value={uiOpacity} onCommit={commitOpacity} /></details><h2>Selected Targets</h2>{selected.length ? selected.map((c) => <button key={c.iso} className="pill" onClick={() => setSelected(selected.filter((x) => x.iso !== c.iso))}>{c.name}<span>{c.iso}</span>×</button>) : <p className="muted">No manual targets selected. Auto-discovery can generate anyway.</p>}<button onClick={() => setSelected([])}>Clear selections</button>{recommendations.length > 0 && <><h2>AI Recommended Targets</h2>{recommendations.map((target) => <div className="recommendation" key={`${target.name}-${target.reason}`}><b>{target.name}</b><small>{target.reason}</small></div>)}</>}{(busy || status) && <ProgressPanel status={status} poiCount={poiCount} activity={activity} />}</aside>
     </main>
     {portfolioProfile && <PortfolioIntel profile={portfolioProfile} />}
     {chits.length > 0 && <section className="poiWindow"><div className="arrayHeader"><div><span className="eyebrow">CHITFORGE</span><h2>TACTICAL POI ARRAY</h2><strong>{chits.length} / {poiCount} POIs GENERATED</strong>{modelInfo?.model && <strong>MODEL: {modelInfo.model.displayName}</strong>}<strong>FACT CHECK: 2-PASS</strong></div><div className="actions"><button onClick={copyAll}>Copy All</button><button onClick={() => exportBrief()}>Download DOCX</button><button onClick={runGeneration} disabled={busy}>Regenerate All</button></div></div><div className="chits">{chits.map((chit, i) => <ChitCard key={`${chit.target}-${i}-${chit.poi}`} chit={chit} number={i + 1} onCopy={copyText} onExport={() => exportBrief([chit])} onFollowUp={() => addFollowUp(i)} onRegenerate={() => regenerateOne(i)} />)}</div></section>}
@@ -296,7 +302,7 @@ function StatusBadge({ status }) {
 
 function SourceCard({ source }) {
   const domain = source.domain || domainFromUrl(source.url);
-  return <div className="sourceCard glass-source-card"><div><b>SOURCE</b><h3>{source.sourceName || 'Manual verification source'}</h3><p>Organization: {source.organization || 'MANUAL VERIFICATION'}<br />Published: {source.publicationDate || 'MANUAL VERIFICATION'}</p></div><div><b>STATUS</b><StatusBadge status={source.status || 'MANUAL VERIFICATION'} /><p><b>SOURCE QUALITY</b><br />{source.quality || 'LIMITED'}</p></div><p><b>CLAIM SUPPORTED</b><br />{source.claimSupported || source.claim || 'MANUAL VERIFICATION: claim support must be checked.'}</p>{source.url && <a className="sourceLink" href={source.url} target="_blank" rel="noreferrer">OPEN SOURCE ↗ {domain && <small>{domain}</small>}</a>}{source.verificationReason && <small>{source.verificationReason}</small>}</div>;
+  return <div className="sourceCard glass-source-card"><div><b>SOURCE</b><h3>{source.sourceName || 'Manual verification source'}</h3><p>Organization: {source.organization || 'MANUAL VERIFICATION'}<br />Published: {source.publicationDate || 'MANUAL VERIFICATION'}</p></div><div><b>STATUS</b><StatusBadge status={source.status || 'MANUAL VERIFICATION'} /><p><b>SOURCE QUALITY</b><br />{source.quality || 'LIMITED'}</p></div><p><b>CLAIM SUPPORTED</b><br />{source.claimSupported || source.claim || 'MANUAL VERIFICATION: claim support must be checked.'}</p>{source.ddgsQuery && <p><b>DDGS QUERY</b><br />{source.ddgsQuery}</p>}{source.url && <a className="sourceLink" href={source.url} target="_blank" rel="noreferrer">OPEN SOURCE ↗ {domain && <small>{domain}</small>}</a>}{source.bangUrl && <a className="sourceLink" href={source.bangUrl} target="_blank" rel="noreferrer">OPEN DDG BANG ↗</a>}{source.verificationReason && <small>{source.verificationReason}</small>}</div>;
 }
 
 function ChitCard({ chit, number, onCopy, onFollowUp, onRegenerate }) {

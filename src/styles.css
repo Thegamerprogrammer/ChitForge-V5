@@ -673,3 +673,5 @@ button::after, .backgroundPicker::after, .sourceLink::after {
   opacity: .65;
 }
 .titleCard img { display: none; }
+.countryHitArea { fill: transparent; stroke: transparent; pointer-events: all; cursor: pointer; }
+.countryHitArea:hover, .countryHitArea:focus { stroke: rgba(235,247,255,.75); stroke-width: .8; }

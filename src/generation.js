@@ -1,18 +1,21 @@
 import { callGemini, callFactCheck, repairJsonWithGemini, GeminiError, CHITFORGE_RESPONSE_SCHEMA, FOLLOW_UP_RESPONSE_SCHEMA } from './gemini.js';
-import { findDuplicatePoiIndexes } from './validation.js';
+import { findDuplicatePoiIndexes, validateMissionResponse } from './validation.js';
 import { toInternalMission, validateInternalMission, extractJson } from './responseParser.js';
 import { applyFactCheckToSources, validateSources } from './sourceValidation.js';
+import { discoverResearch } from './ddgsResearch.js';
 
 export async function generateMission({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes = ['AUTO'], onProgress, modelSelection }) {
   onProgress?.({ stage: 'INITIALIZING', detail: 'Initializing ChitForge synthesis engine.', done: 0, total: poiCount });
   onProgress?.({ stage: 'READING AGENDA', detail: 'Reading committee, agenda and portfolio inputs.', done: 0, total: poiCount });
-  const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes });
+  onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: 'Starting official DDGS API URL discovery.', done: 0, total: 60 });
+  const researchPacket = await discoverResearch({ form, sliders, selectedTargets, targetingMode, poiTypes, onProgress });
+  const prompt = buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes, researchPacket });
   onProgress?.({ stage: 'ANALYZING PORTFOLIO', detail: 'Analyzing portfolio foreign-policy interests.', done: 0, total: poiCount });
   onProgress?.({ stage: 'ANALYZING FOREIGN POLICY', detail: 'Mapping foreign-policy alignment and constraints.', done: 0, total: poiCount });
   onProgress?.({ stage: 'MAPPING TARGETS', detail: 'Mapping selected and global target opportunities.', done: 0, total: poiCount });
   onProgress?.({ stage: 'RESEARCHING EVIDENCE', detail: 'Requesting traceable source-backed evidence.', done: 0, total: poiCount });
   onProgress?.({ stage: 'ANALYZING LEGAL FRAMEWORKS', detail: 'Separating legal obligations from political commitments.', done: 0, total: poiCount });
-  let response = await callGemini(form.apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA, onModelStatus: (status) => onProgress?.({ stage: 'MAPPING TARGETS', detail: `Using ${status.model.displayName} for ${status.mode}.`, done: 0, total: poiCount }) });
+  let response = await callGemini(form.apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA, attachments: form.backgroundGuide?.data ? [form.backgroundGuide] : [], onModelStatus: (status) => onProgress?.({ stage: 'MAPPING TARGETS', detail: `Using ${status.model.displayName} for ${status.mode}.`, done: 0, total: poiCount }) });
   let text = response.text;
   let mission = await recoverMission({ apiKey: form.apiKey, text, ctx: { form, sliders, includeFollowUp, poiCount, targetingMode, poiTypes, lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
   const duplicates = findDuplicatePoiIndexes(mission.chits);
@@ -29,7 +32,9 @@ export async function generateMission({ form, sliders, selectedTargets, targetin
   mission.chits = await Promise.all(mission.chits.map(async (poi) => ({ ...poi, evidence: await validateSources(poi.evidence || []) })));
   onProgress?.({ stage: 'CALCULATING PRESSURE', detail: 'Calculating local pressure, word count, line and speaking-time metrics.', done: mission.chits.length, total: poiCount });
   mission = await runFactChecks({ mission, form, apiKey: form.apiKey, primaryModel: response.model, modelSelection, onProgress });
-  return { ...mission, modelInfo: { model: response.model, factCheckModel: mission.metadata.factCheckModel, mode: response.mode, fallbackLog: response.fallbackLog } };
+  mission.validationProblems = validateMissionResponse(mission, { targetingMode, poiCount, portfolio: form.portfolio, freezeDate: form.freezeDate });
+  mission.metadata = { ...(mission.metadata || {}), researchPacketStats: researchPacket.stats, ddgsQueries: researchPacket.queries };
+  return { ...mission, researchPacket, modelInfo: { model: response.model, factCheckModel: mission.metadata.factCheckModel, mode: response.mode, fallbackLog: response.fallbackLog } };
 }
 
 export async function regenerateChit({ form, sliders, chit, existingChits, apiKey, includeFollowUp, onProgress, modelSelection }) {
@@ -38,7 +43,10 @@ export async function regenerateChit({ form, sliders, chit, existingChits, apiKe
   const response = await callGemini(apiKey, prompt, { ...modelSelection, schema: CHITFORGE_RESPONSE_SCHEMA });
   const text = response.text;
   const mission = await recoverMission({ apiKey, text, ctx: { form, sliders, includeFollowUp, poiCount: 1, targetingMode: 'regenerate', lengthInfo: lengthInfo(sliders.length) }, modelSelection, modelInfo: { primaryModel: response.model.displayName } });
-  return mission.chits[0] || chit;
+  const regenerated = mission.chits[0] || chit;
+  const problems = validateMissionResponse({ ...mission, chits: [regenerated], portfolioProfile: mission.portfolioProfile || { summary: 'Regeneration' } }, { targetingMode: 'regenerate', poiCount: 1, portfolio: form.portfolio, freezeDate: form.freezeDate });
+  if (problems.some((problem) => /Own portfolio/i.test(problem))) throw new GeminiError('Regeneration attempted to target the portfolio country; rejected by validation.', { category: 'own-portfolio-target' });
+  return regenerated;
 }
 
 export async function generateFollowUp({ form, sliders, chit, apiKey, onProgress, modelSelection }) {
@@ -88,6 +96,7 @@ POI: ${poi.poi}
 LEGAL FOUNDATION: ${poi.legalFoundation}
 CLASSIFICATION: ${poi.classification}
 CLASSIFICATION REASON: ${poi.classificationReason}
+FREEZE DATE: ${form.freezeDate || 'NONE'}
 EVIDENCE: ${JSON.stringify(poi.evidence)}
 DOCUMENTED ISSUE: ${poi.documentedIssue}`;
 }
@@ -131,7 +140,7 @@ export function lengthInfo(length) { return band(length, [[10, { lines: '≈ 1 l
 function aggressionInstruction(value) { return band(value, [[10, 'Use a calm, neutral question with minimal confrontation.'], [30, 'Use a mild challenge that asks for a clear policy explanation.'], [50, 'Use a firm challenge and clearly expose the relevant disagreement.'], [70, 'Use strong direct wording and pressure; ask how the delegation can justify the contradiction.'], [85, 'Use very aggressive but MUN-usable wording. Lead into the contradiction and give little room for vague answers.'], [100, 'Use maximum directness. Lead with the strongest verified contradiction, remove unnecessary diplomatic cushioning, end with a direct challenge, and do not soften the wording. Do not use insults or unsupported accusations.']]); }
 function controversyInstruction(value) { return band(value, [[10, 'Use a normal policy disagreement only.'], [30, 'Use a minor documented inconsistency if available.'], [50, 'Use a clear policy contradiction tied to the agenda.'], [70, 'Use a serious documented contradiction, commitment gap, vote, dispute, or implementation failure.'], [85, 'Prioritize major verified controversies, commitment failures, policy-practice gaps, legal disputes, or financial inconsistencies.'], [100, 'Search for the strongest relevant VERIFIED pressure point available: broken commitments, conflicting statements, voting contradictions, legal disputes, implementation failures, or financial inconsistencies. Never manufacture or exaggerate controversy.']]); }
 function diplomacyInstruction(value) { return band(value, [[10, 'Use blunt, direct wording. Do not add diplomatic cushioning.'], [30, 'Use very direct MUN wording with minimal restraint.'], [50, 'Use normal MUN language with moderate diplomatic restraint.'], [70, 'Use formal language while preserving pressure.'], [85, 'Use highly diplomatic polish without weakening the challenge.'], [100, 'Use maximum diplomatic polish, but preserve the same substantive pressure and direct question. High diplomacy does not reduce pressure.']]); }
-export function buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes = ['AUTO'] }) {
+export function buildMissionPrompt({ form, sliders, selectedTargets, targetingMode, includeFollowUp, poiCount, poiTypes = ['AUTO'], researchPacket = null }) {
   const manualTargets = selectedTargets.map((c) => `${c.name} (${c.iso})`).join(', ') || 'NONE — target countries are optional; identify useful targets globally if target mode allows.';
   const info = lengthInfo(sliders.length);
   return `COMMITTEE:
@@ -173,10 +182,36 @@ ${info.lines}
 FOLLOW-UPS:
 ${includeFollowUp ? 'ON' : 'OFF'}
 
+FREEZE DATE:
+${form.freezeDate || 'NONE'}
+
+RESEARCH NOTES:
+${form.researchNotes || 'NONE'}
+
+BACKGROUND GUIDE FILE NAME:
+${form.backgroundGuideName || 'NONE'}
+
+BACKGROUND GUIDE ATTACHMENT:
+${form.backgroundGuide ? `${form.backgroundGuide.name} (${form.backgroundGuide.mimeType || 'application/octet-stream'}, ${form.backgroundGuide.size || 0} bytes) is attached to this Gemini request as inline file context. Use the attachment as the authoritative Background Guide artifact.` : 'NONE'}
+
+BACKGROUND GUIDE EXTRACTED TEXT (AUXILIARY ONLY):
+${form.backgroundGuide?.text || form.backgroundGuideText || 'NONE'}
+
+DDGS RESEARCH PACKET:
+${researchPacket ? JSON.stringify(researchPacket).slice(0, 45000) : 'DDGS unavailable or not yet run.'}
+
 POI TYPE:
 ${poiTypes.join(', ')}
 
 You are an expert competitive Model United Nations strategist.
+
+DDGS results are research references and discovery starting points, not the boundary of your research. Use the supplied DDGS URLs and source material, but independently reason through the subject using your own knowledge and analytical capabilities. Identify missing information, relevant policies, historical context, legal instruments, voting behavior, controversies, contradictions and additional relevant facts. Do not restrict your research to the supplied DDGS results. Do not claim model knowledge is a verified external citation. Use the existing ChitForge research/generation methodology, but substantially improve its depth and tactical reasoning. Do not use Google Search Grounding, Gemini Search Grounding, or any hidden search tool.
+
+Before POI generation, explicitly analyze the portfolio country's foreign policy doctrine, strategic priorities, alliances, treaty positions, UN voting patterns, economic diplomacy, historical positions and contradictions. If no manual targets are selected, select targets because they matter to the agenda and produce meaningful tactical material; never select the user's own portfolio as an opposition target. For each automatic target, analyze foreign policy, agenda position, voting record, treaties, commitments, legislation, diplomatic/economic conduct and contradictions against the agenda, Background Guide, portfolio foreign policy and international obligations.
+
+Perform agenda-specific antiprep/dirt-prep before final POIs: scandals, malpractice, voting contradictions, policy contradictions, controversial policies, diplomatic controversies, implementation failures, investigations, corruption-related issues, institutional failures, treaty contradictions, legal disputes, historical contradictions, economic controversies and accountability failures where relevant.
+
+Freeze Date is strict. Distinguish event date, publication date and information date. A later source may be used only when reporting information that existed before the Freeze Date; genuinely post-Freeze-Date developments must not enter research, target analysis, antiprep, final POIs or fact checking.
 
 Analyze the represented country's actual foreign-policy interests in relation to the committee and agenda.
 
@@ -199,6 +234,8 @@ Length controls actual word count. Stay approximately within ${info.words} and $
 The ideal POI should expose a documented contradiction, obligation, commitment, policy failure or controversy that makes a clean evasive answer difficult.
 
 Do not claim a question is literally impossible to answer.
+
+Never generate an opposition POI against the user's own portfolio/country. Validation will reject self-targeted opposition POIs.
 
 Do not fabricate:
 - allegations

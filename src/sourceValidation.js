@@ -48,7 +48,7 @@ export function normalizeEvidenceSource(raw = {}) {
   const url = raw.url || raw.sourceUrl || raw.source_url || raw.link || '';
   const structural = validateSourceUrl(url);
   const sourceType = normalizeSourceType(raw.sourceType || raw.source_type || raw.sourceClassification || raw.type || organization);
-  return { sourceName, organization, publicationDate, url, claimSupported: raw.claimSupported || raw.claim || raw.text || 'MANUAL VERIFICATION: claim support must be checked.', sourceType, confidence: Number(raw.confidence || 0), quality: sourceQuality(sourceType), status: structural.status, verificationReason: structural.reason, domain: structural.domain || domainFromUrl(url) };
+  return { sourceName, organization, publicationDate, url, claimSupported: raw.claimSupported || raw.claim || raw.text || 'MANUAL VERIFICATION: claim support must be checked.', sourceType, confidence: Number(raw.confidence || 0), quality: sourceQuality(sourceType), status: structural.status, verificationReason: structural.reason, domain: structural.domain || raw.domain || domainFromUrl(url), ddgsQuery: raw.ddgsQuery || raw.query || '', bangUrl: raw.bangUrl || raw.duckDuckGoBangUrl || raw.duckduckgo_bang_url || '', canonicalUrl: raw.canonicalUrl || raw.canonical_url || url, eventDate: raw.eventDate || raw.event_date || '', informationDate: raw.informationDate || raw.information_date || '' };
 }
 
 export function applyFactCheckToSources(evidence = [], factCheck) {
