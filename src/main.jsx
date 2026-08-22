@@ -11,6 +11,7 @@ import { downloadBrief } from './export.js';
 import { renderMarkdownBold } from './format.js';
 import { POI_TYPES } from './validation.js';
 import { domainFromUrl } from './sourceValidation.js';
+import { resolveCountry, searchCountries } from './countrySearch.js';
 
 const defaultSliders = { aggression: 0, controversy: 0, diplomacy: 0, length: 0 };
 const modes = [
@@ -22,7 +23,7 @@ const MemoWorldMap = React.memo(WorldMap);
 
 function App() {
   const stored = useMemo(() => loadStoredKey(), []);
-  const [form, setForm] = useState({ committee: '', agenda: '', portfolio: '', freezeDate: '', researchNotes: '', backgroundGuideName: '', backgroundGuideText: '', backgroundGuide: null, apiKey: stored.key, rememberKey: stored.rememberKey });
+  const [form, setForm] = useState({ committee: '', mandate: '', agenda: '', portfolio: '', freezeDate: '', researchNotes: '', backgroundGuideName: '', backgroundGuideText: '', backgroundGuideStatus: '', backgroundGuide: null, apiKey: stored.key, rememberKey: stored.rememberKey });
   const [showKey, setShowKey] = useState(false);
   const [sliders, setSliders] = useState(defaultSliders);
   const [poiCount, setPoiCount] = useState(5);
@@ -145,12 +146,13 @@ function App() {
       <section className="panel controls">
         <h2>Mission Parameters</h2>
         <label>Committee<input value={form.committee} onChange={(e) => updateForm('committee', e.target.value)} placeholder="e.g. ECOFIN" /></label>
+        <label>Mandate<input value={form.mandate} onChange={(e) => updateForm('mandate', e.target.value)} placeholder="Optional committee mandate or remit" /></label>
         <label>Agenda / Topic<textarea value={form.agenda} onChange={(e) => updateForm('agenda', e.target.value)} placeholder="e.g. Sovereign debt restructuring and development finance" /></label>
         <label>Portfolio / Country<input value={form.portfolio} onChange={(e) => updateForm('portfolio', e.target.value)} placeholder="e.g. Indonesia or IDN" /></label>
         <label>Freeze Date<input type="date" value={form.freezeDate} onChange={(e) => updateForm('freezeDate', e.target.value)} /></label>
         <label>Research Notes<textarea value={form.researchNotes} onChange={(e) => updateForm('researchNotes', e.target.value)} placeholder="Optional priorities, arguments to test, sources to prefer, or countries to watch." /></label>
-        <label className="backgroundPicker">Background Guide<input type="file" accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,text/*,application/pdf" onChange={async (e) => { const file = e.target.files?.[0]; if (!file) return; const dataUrl = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || '')); reader.onerror = reject; reader.readAsDataURL(file); }).catch(() => ''); const text = await file.text().catch(() => ''); const data = dataUrl.includes(',') ? dataUrl.split(',').pop() : ''; setForm((current) => ({ ...current, backgroundGuideName: file.name, backgroundGuideText: text, backgroundGuide: { name: file.name, mimeType: file.type || 'application/octet-stream', size: file.size, lastModified: file.lastModified, data, text } })); }} /></label>
-        {form.backgroundGuideName && <p className="muted">Attached Background Guide: {form.backgroundGuideName}</p>}
+        <label className="backgroundPicker">Background Guide<input type="file" accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,text/*,application/pdf" onChange={async (e) => { const file = e.target.files?.[0]; if (!file) return; const dataUrl = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || '')); reader.onerror = reject; reader.readAsDataURL(file); }).catch(() => ''); const canReadText = /^text\//.test(file.type) || /\.(txt|md|csv|json)$/i.test(file.name); const text = canReadText ? await file.text().catch(() => '') : ''; const data = dataUrl.includes(',') ? dataUrl.split(',').pop() : ''; const status = !data ? 'Attachment failed to load. Continue without a guide or select the file again.' : text ? 'Text extracted; Stage 0 will treat this as contextual grounding.' : 'Binary guide attached; Stage 0 Gemini will extract it as contextual grounding.'; setForm((current) => ({ ...current, backgroundGuideName: file.name, backgroundGuideText: text, backgroundGuideStatus: status, backgroundGuide: { name: file.name, mimeType: file.type || 'application/octet-stream', size: file.size, lastModified: file.lastModified, data, text } })); }} /></label>
+        {form.backgroundGuideName && <p className="muted">Attached Background Guide: {form.backgroundGuideName}. {form.backgroundGuideStatus}</p>}
         <label>Gemini API Key<div className="keyRow"><input type={showKey ? 'text' : 'password'} autoComplete="off" value={form.apiKey} onChange={(e) => updateForm('apiKey', e.target.value)} placeholder="Stored for this session by default" /><button type="button" onClick={() => setShowKey(!showKey)}>{showKey ? 'Hide' : 'Show'}</button></div></label>
         <div className="row"><label className="check switchField"><input type="checkbox" checked={form.rememberKey} onChange={(e) => updateForm('rememberKey', e.target.checked)} /><span className="glassSwitch" aria-hidden="true"><i /></span><span>Save beyond this session</span></label><button onClick={() => { clearStoredKey(); setForm({ ...form, apiKey: '', rememberKey: false }); }}>Clear Key</button></div>
 
@@ -169,7 +171,7 @@ function App() {
         </div>
         <h2>Targeting Mode</h2>
         <div className="modes">{modes.map(([id, label, help]) => <label key={id} className="mode"><input type="radio" checked={mode === id} onChange={() => setMode(id)} /> <b>{label}</b><small>{help}</small></label>)}</div>
-        <label>POIs to Generate<input type="number" min="1" max="20" value={poiCount} onChange={(e) => setPoiCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))} /></label>
+        <label>POIs to Generate<input type="number" min="1" max="100" value={poiCount} onChange={(e) => setPoiCount(Math.max(1, Math.min(100, Number(e.target.value) || 1)))} /></label>
         <label className="check switchField"><input type="checkbox" checked={includeFollowUp} onChange={(e) => setIncludeFollowUp(e.target.checked)} /><span className="glassSwitch" aria-hidden="true"><i /></span><span>Generate Follow-Up</span></label>
         <h2>POI Type</h2>
         <div className="typeGrid" role="group" aria-label="POI type selection">{POI_TYPES.map((type) => <label key={type} className={`typeChip ${poiTypes.includes(type) ? 'active' : ''}`}>
@@ -186,12 +188,28 @@ function App() {
         <button className="primary" onClick={runGeneration} disabled={busy}>{busy ? 'Synthesizing Tactical POIs…' : 'Generate Tactical POI Array'}</button>
         {error && <ErrorBox error={error} />}
       </section>
-      <section className="panel mapPanel"><h2>Real World Target Map</h2><MemoWorldMap selected={selected} setSelected={setSelected} portfolio={form.portfolio} /></section>
+      <section className="panel mapPanel"><h2>Real World Target Map</h2><CountrySearch selected={selected} setSelected={setSelected} /><MemoWorldMap selected={selected} setSelected={setSelected} portfolio={form.portfolio} /></section>
       <aside className="panel queue glass-sidebar"><details className="settingsPanel" open><summary>Generation Settings</summary><div className="settingsGrid"><span>POI Count<b>{poiCount}</b></span><span>POI Type<b>{poiTypes.join(', ')}</b></span><span>Target Mode<b>{mode}</b></span><span>Follow-ups<b>{includeFollowUp ? 'ON' : 'OFF'}</b></span><span>Model<b>{modelInfo?.model?.displayName || modelMode}</b></span><span>Aggression<b>{sliders.aggression}</b></span><span>Controversy<b>{sliders.controversy}</b></span><span>Diplomacy<b>{sliders.diplomacy}</b></span><span>Length<b>{sliders.length}</b></span><span>Freeze Date<b>{form.freezeDate || 'None'}</b></span><span>DDGS URLs<b>{researchPacket?.stats?.retainedUrls ?? 0}</b></span></div><GlassRange name="opacity" value={uiOpacity} onCommit={commitOpacity} /></details><h2>Selected Targets</h2>{selected.length ? selected.map((c) => <button key={c.iso} className="pill" onClick={() => setSelected(selected.filter((x) => x.iso !== c.iso))}>{c.name}<span>{c.iso}</span>×</button>) : <p className="muted">No manual targets selected. Auto-discovery can generate anyway.</p>}<button onClick={() => setSelected([])}>Clear selections</button>{recommendations.length > 0 && <><h2>AI Recommended Targets</h2>{recommendations.map((target) => <div className="recommendation" key={`${target.name}-${target.reason}`}><b>{target.name}</b><small>{target.reason}</small></div>)}</>}{(busy || status) && <ProgressPanel status={status} poiCount={poiCount} activity={activity} />}</aside>
     </main>
     {portfolioProfile && <PortfolioIntel profile={portfolioProfile} />}
     {chits.length > 0 && <section className="poiWindow"><div className="arrayHeader"><div><span className="eyebrow">CHITFORGE</span><h2>TACTICAL POI ARRAY</h2><strong>{chits.length} / {poiCount} POIs GENERATED</strong>{modelInfo?.model && <strong>MODEL: {modelInfo.model.displayName}</strong>}<strong>FACT CHECK: 2-PASS</strong></div><div className="actions"><button onClick={copyAll}>Copy All</button><button onClick={() => exportBrief()}>Download DOCX</button><button onClick={runGeneration} disabled={busy}>Regenerate All</button></div></div><div className="chits">{chits.map((chit, i) => <ChitCard key={`${chit.target}-${i}-${chit.poi}`} chit={chit} number={i + 1} onCopy={copyText} onExport={() => exportBrief([chit])} onFollowUp={() => addFollowUp(i)} onRegenerate={() => regenerateOne(i)} />)}</div></section>}
   </div>;
+}
+
+function CountrySearch({ selected, setSelected }) {
+  const [query, setQuery] = useState('');
+  const [active, setActive] = useState(0);
+  const exact = resolveCountry(query);
+  const suggestions = searchCountries(query);
+  const choose = (country) => { if (!country) return; setSelected((current) => current.some((item) => item.iso === country.iso) ? current : [...current, { ...country, source: 'USER_SELECTED_OPPOSITION' }]); setQuery(''); setActive(0); };
+  const onKeyDown = (event) => {
+    if (!suggestions.length) return;
+    if (event.key === 'ArrowDown') { event.preventDefault(); setActive((index) => Math.min(index + 1, suggestions.length - 1)); }
+    if (event.key === 'ArrowUp') { event.preventDefault(); setActive((index) => Math.max(index - 1, 0)); }
+    if (event.key === 'Enter') { event.preventDefault(); choose(exact || suggestions[active]); }
+    if (event.key === 'Escape') setQuery('');
+  };
+  return <div className="countrySearch"><label htmlFor="country-opposition-search">⌕ Select opposition country</label><input id="country-opposition-search" value={query} onChange={(event) => { setQuery(event.target.value); setActive(0); }} onKeyDown={onKeyDown} placeholder="Search e.g. China, USA, United States" autoComplete="off" aria-autocomplete="list" aria-controls="country-search-results" aria-expanded={Boolean(query)} />{query && <div id="country-search-results" className="countrySuggestions" role="listbox">{suggestions.length ? suggestions.map((country, index) => <button key={country.iso} type="button" role="option" aria-selected={index === active} className={index === active ? 'active' : ''} onMouseDown={(event) => { event.preventDefault(); choose(country); }}><span>{country.name}</span><small>{country.iso}</small></button>) : <p role="status">Country not found. Try a common name or ISO code.</p>}</div>}<div className="selectedCountryStatus" aria-live="polite">{selected.length ? `${selected.length} opposition ${selected.length === 1 ? 'country' : 'countries'} selected` : 'No manual opposition country selected.'}</div></div>;
 }
 
 
@@ -357,4 +375,3 @@ function LiquidGlassFilters() {
 }
 
 createRoot(document.getElementById('root')).render(<App />);
-
