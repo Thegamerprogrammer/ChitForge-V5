@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { allocateActorQueries, canonicalUrl, clusterIncidents, deduplicateSources, freezeValidation, newsShare, pooled, queryBudget, retrieveQueries, targetValue } from './ddgsResearch.js';
 import { resolveCountry, searchCountries } from './countrySearch.js';
 
-for (const count of [1, 10, 20, 50, 100]) { const budget = queryBudget(count); assert.equal(budget.stage1, Math.round(count * 7.5)); assert.equal(budget.stage2, count * 10); }
-assert.deepEqual(queryBudget(20), { stage1: 150, stage2: 200 });
-assert.deepEqual(queryBudget(100), { stage1: 750, stage2: 1000 });
+for (const count of [1, 10, 20, 50, 100]) { const budget = queryBudget(count); assert.equal(budget.stage1, count * 6); assert.equal(budget.stage2, count * 8); assert.equal(budget.stage3, count * 4); }
+assert.deepEqual(queryBudget(20), { stage1: 120, stage2: 160, stage3: 80 });
+assert.deepEqual(queryBudget(100), { stage1: 600, stage2: 800, stage3: 400 });
 assert.equal(newsShare(0), .2); assert.equal(newsShare(45), .5); assert.equal(newsShare(70), .7); assert.equal(newsShare(100), .85);
 assert.equal(canonicalUrl('https://www.un.org/a/?utm_source=x#part'), 'https://un.org/a');
 assert.equal(deduplicateSources([{ canonicalUrl:'https://x.test' }, { canonicalUrl:'https://x.test' }]).length, 1);
@@ -25,7 +25,7 @@ const indexed = await pooled(['first', 'second', 'third'], async (value, index) 
 assert.deepEqual(indexed, ['0:first', '1:second', '2:third'], 'pooled work retains stable input order and indexes');
 const progress = [];
 const retrieval = await retrieveQueries(['a', 'b', 'c'], { stage:2, controversy:70, extractionBudget:3, onProgress:(event) => progress.push(event), search:async (query) => query === 'b' ? { results:[], error:'timeout' } : { results:[{ href:`https://example.test/${query}`, title:query }] }, extract:async () => ({ content:'page', error:null }) });
-assert.deepEqual(progress.map((event) => event.done), [1, 2, 3], 'progress advances once per completed attempt without NaN');
+assert.deepEqual(progress.map((event) => event.done ?? event.completed), [3], 'progress advances by persisted DDGS batch without NaN');
 assert(progress.every((event) => Number.isFinite(event.done) && event.total === 3), 'progress counters are finite');
-assert.deepEqual(retrieval.diagnostics, { attempted:3, successful:2, failed:1, empty:0, extracted:2, usableAfterFreeze:0 });
-console.log('four-stage research planning tests passed');
+assert.deepEqual(retrieval.diagnostics, { attempted:3, successful:2, failed:1, empty:0, extracted:2, usableAfterFreeze:2 });
+console.log('five-stage research planning tests passed');

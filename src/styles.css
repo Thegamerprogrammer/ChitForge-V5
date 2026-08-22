@@ -681,3 +681,8 @@ button::after, .backgroundPicker::after, .sourceLink::after {
 .titleCard img { display: none; }
 .countryHitArea { fill: transparent; stroke: transparent; pointer-events: all; cursor: pointer; }
 .countryHitArea:hover, .countryHitArea:focus { stroke: rgba(235,247,255,.75); stroke-width: .8; }
+.discoveryWidget { margin: 1rem 0; padding: 1rem; border: 1px solid rgba(255,255,255,.16); border-radius: 18px; background: rgba(255,255,255,.06); }
+.discoveryWidget h2 { margin-top: 0; font-size: .95rem; letter-spacing: .08em; }
+.discoveryWidget h3 { font-size: .8rem; margin-bottom: .35rem; opacity: .8; }
+.discoveryWidget p { font-size: .82rem; line-height: 1.35; }
+.stageWidgets { margin-top: 1rem; }
