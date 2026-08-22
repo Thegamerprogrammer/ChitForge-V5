@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { allocateActorQueries, canonicalUrl, clusterIncidents, deduplicateSources, freezeValidation, newsShare, queryBudget, targetValue } from './ddgsResearch.js';
+import { allocateActorQueries, canonicalUrl, clusterIncidents, deduplicateSources, freezeValidation, newsShare, pooled, queryBudget, retrieveQueries, targetValue } from './ddgsResearch.js';
 import { resolveCountry, searchCountries } from './countrySearch.js';
 
 for (const count of [1, 10, 20, 50, 100]) { const budget = queryBudget(count); assert.equal(budget.stage1, Math.round(count * 7.5)); assert.equal(budget.stage2, count * 10); }
@@ -21,4 +21,11 @@ assert.equal(targetValue({ agendaRelevance:100, evidenceStrength:100, legalAccou
 assert.equal(resolveCountry(' People\'s Republic of China ').iso, 'CHN');
 assert.equal(resolveCountry('USA').name, 'United States');
 assert(searchCountries('united stat').some((country) => country.iso === 'USA'), 'partial country search returns an autocomplete match');
+const indexed = await pooled(['first', 'second', 'third'], async (value, index) => { await new Promise((resolve) => setTimeout(resolve, (2 - index) * 3)); return `${index}:${value}`; }, 3);
+assert.deepEqual(indexed, ['0:first', '1:second', '2:third'], 'pooled work retains stable input order and indexes');
+const progress = [];
+const retrieval = await retrieveQueries(['a', 'b', 'c'], { stage:2, controversy:70, extractionBudget:3, onProgress:(event) => progress.push(event), search:async (query) => query === 'b' ? { results:[], error:'timeout' } : { results:[{ href:`https://example.test/${query}`, title:query }] }, extract:async () => ({ content:'page', error:null }) });
+assert.deepEqual(progress.map((event) => event.done), [1, 2, 3], 'progress advances once per completed attempt without NaN');
+assert(progress.every((event) => Number.isFinite(event.done) && event.total === 3), 'progress counters are finite');
+assert.deepEqual(retrieval.diagnostics, { attempted:3, successful:2, failed:1, empty:0, extracted:2, usableAfterFreeze:0 });
 console.log('four-stage research planning tests passed');

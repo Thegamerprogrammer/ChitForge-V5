@@ -18,7 +18,7 @@ const modes = [
   ['selected_global', 'Selected + Global Research', 'Selected countries are primary targets; AI may add stronger agenda-relevant targets.'],
   ['selected_only', 'Selected Targets Only', 'Use only countries selected on the real world map.'],
 ];
-const progressStages = ['INITIALIZING', 'READING AGENDA', 'ANALYZING PORTFOLIO', 'ANALYZING FOREIGN POLICY', 'MAPPING TARGETS', 'RESEARCHING EVIDENCE', 'ANALYZING LEGAL FRAMEWORKS', 'GENERATING POIs', 'VALIDATING STRUCTURE', 'FACT CHECK PASS 1', 'FACT CHECK PASS 2', 'CALCULATING PRESSURE', 'FINALIZING CHITS', 'PREPARING DOCX'];
+const progressStages = ['INITIALIZING', 'STAGE 0 CONTEXT', 'STAGE 1 ACTOR DISCOVERY', 'STAGE 1 DDGS', 'STAGE 2 TARGET INTELLIGENCE', 'STAGE 2 DDGS', 'STAGE 3 POI GENERATION', 'VALIDATING STRUCTURE', 'FINALIZING CHITS', 'PREPARING DOCX'];
 const MemoWorldMap = React.memo(WorldMap);
 
 function App() {
@@ -188,7 +188,7 @@ function App() {
         <button className="primary" onClick={runGeneration} disabled={busy}>{busy ? 'Synthesizing Tactical POIs…' : 'Generate Tactical POI Array'}</button>
         {error && <ErrorBox error={error} />}
       </section>
-      <section className="panel mapPanel"><h2>Real World Target Map</h2><CountrySearch selected={selected} setSelected={setSelected} /><MemoWorldMap selected={selected} setSelected={setSelected} portfolio={form.portfolio} /></section>
+      <section className="panel mapPanel"><h2>Real World Target Map</h2><CountrySearch selected={selected} setSelected={setSelected} portfolio={form.portfolio} /><MemoWorldMap selected={selected} setSelected={setSelected} portfolio={form.portfolio} /></section>
       <aside className="panel queue glass-sidebar"><details className="settingsPanel" open><summary>Generation Settings</summary><div className="settingsGrid"><span>POI Count<b>{poiCount}</b></span><span>POI Type<b>{poiTypes.join(', ')}</b></span><span>Target Mode<b>{mode}</b></span><span>Follow-ups<b>{includeFollowUp ? 'ON' : 'OFF'}</b></span><span>Model<b>{modelInfo?.model?.displayName || modelMode}</b></span><span>Aggression<b>{sliders.aggression}</b></span><span>Controversy<b>{sliders.controversy}</b></span><span>Diplomacy<b>{sliders.diplomacy}</b></span><span>Length<b>{sliders.length}</b></span><span>Freeze Date<b>{form.freezeDate || 'None'}</b></span><span>DDGS URLs<b>{researchPacket?.stats?.retainedUrls ?? 0}</b></span></div><GlassRange name="opacity" value={uiOpacity} onCommit={commitOpacity} /></details><h2>Selected Targets</h2>{selected.length ? selected.map((c) => <button key={c.iso} className="pill" onClick={() => setSelected(selected.filter((x) => x.iso !== c.iso))}>{c.name}<span>{c.iso}</span>×</button>) : <p className="muted">No manual targets selected. Auto-discovery can generate anyway.</p>}<button onClick={() => setSelected([])}>Clear selections</button>{recommendations.length > 0 && <><h2>AI Recommended Targets</h2>{recommendations.map((target) => <div className="recommendation" key={`${target.name}-${target.reason}`}><b>{target.name}</b><small>{target.reason}</small></div>)}</>}{(busy || status) && <ProgressPanel status={status} poiCount={poiCount} activity={activity} />}</aside>
     </main>
     {portfolioProfile && <PortfolioIntel profile={portfolioProfile} />}
@@ -196,12 +196,13 @@ function App() {
   </div>;
 }
 
-function CountrySearch({ selected, setSelected }) {
+function CountrySearch({ selected, setSelected, portfolio }) {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const exact = resolveCountry(query);
   const suggestions = searchCountries(query);
-  const choose = (country) => { if (!country) return; setSelected((current) => current.some((item) => item.iso === country.iso) ? current : [...current, { ...country, source: 'USER_SELECTED_OPPOSITION' }]); setQuery(''); setActive(0); };
+  const isPortfolio = (country) => country && (country.iso.toLowerCase() === portfolio.trim().toLowerCase() || country.name.toLowerCase() === portfolio.trim().toLowerCase());
+  const choose = (country) => { if (!country || isPortfolio(country)) return; setSelected((current) => current.some((item) => item.iso === country.iso) ? current : [...current, { ...country, source: 'USER_SELECTED_OPPOSITION' }]); setQuery(''); setActive(0); };
   const onKeyDown = (event) => {
     if (!suggestions.length) return;
     if (event.key === 'ArrowDown') { event.preventDefault(); setActive((index) => Math.min(index + 1, suggestions.length - 1)); }
@@ -209,7 +210,8 @@ function CountrySearch({ selected, setSelected }) {
     if (event.key === 'Enter') { event.preventDefault(); choose(exact || suggestions[active]); }
     if (event.key === 'Escape') setQuery('');
   };
-  return <div className="countrySearch"><label htmlFor="country-opposition-search">⌕ Select opposition country</label><input id="country-opposition-search" value={query} onChange={(event) => { setQuery(event.target.value); setActive(0); }} onKeyDown={onKeyDown} placeholder="Search e.g. China, USA, United States" autoComplete="off" aria-autocomplete="list" aria-controls="country-search-results" aria-expanded={Boolean(query)} />{query && <div id="country-search-results" className="countrySuggestions" role="listbox">{suggestions.length ? suggestions.map((country, index) => <button key={country.iso} type="button" role="option" aria-selected={index === active} className={index === active ? 'active' : ''} onMouseDown={(event) => { event.preventDefault(); choose(country); }}><span>{country.name}</span><small>{country.iso}</small></button>) : <p role="status">Country not found. Try a common name or ISO code.</p>}</div>}<div className="selectedCountryStatus" aria-live="polite">{selected.length ? `${selected.length} opposition ${selected.length === 1 ? 'country' : 'countries'} selected` : 'No manual opposition country selected.'}</div></div>;
+  const available = suggestions.filter((country) => !isPortfolio(country));
+  return <div className="countrySearch"><label htmlFor="country-opposition-search">⌕ Select opposition country</label><input id="country-opposition-search" value={query} onChange={(event) => { setQuery(event.target.value); setActive(0); }} onKeyDown={onKeyDown} placeholder="Search e.g. China, USA, United States" autoComplete="off" aria-autocomplete="list" aria-controls="country-search-results" aria-expanded={Boolean(query)} />{query && <div id="country-search-results" className="countrySuggestions" role="listbox">{available.length ? available.map((country, index) => <button key={country.iso} type="button" role="option" aria-selected={index === active} className={index === active ? 'active' : ''} onMouseDown={(event) => { event.preventDefault(); choose(country); }}><span>{country.name}</span><small>{country.iso}</small></button>) : <p role="status">Country not found or is your own portfolio.</p>}</div>}<div className="selectedCountryStatus" aria-live="polite">{selected.length ? `${selected.length} opposition ${selected.length === 1 ? 'country' : 'countries'} selected` : 'No manual opposition country selected.'}</div></div>;
 }
 
 

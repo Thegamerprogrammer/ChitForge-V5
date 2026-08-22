@@ -46,6 +46,8 @@ export function WorldMap({ selected, setSelected, portfolio }) {
   }, []);
   const toggle = (country) => {
     if (dragRef.current.moved) return;
+    const portfolioMatch = portfolioText && (country.iso.toLowerCase() === portfolioText || country.name.toLowerCase() === portfolioText);
+    if (portfolioMatch) return;
     setSelected(selectedIso.has(country.iso) ? selected.filter((c) => c.iso !== country.iso) : [...selected, { iso: country.iso, name: country.name, source: 'USER_SELECTED_OPPOSITION' }]);
   };
   const moveTooltip = useCallback((event, country) => {
