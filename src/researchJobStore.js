@@ -1,6 +1,6 @@
 export const RESEARCH_DB_NAME = 'ChitForgeResearchJobStore';
-export const RESEARCH_DB_VERSION = 1;
-export const RESEARCH_STORES = ['jobs','stageArtifacts','queryBatches','ddgsBatches','sources','actors','targets','evidence','incidents','pois','progress','errors','diagnostics'];
+export const RESEARCH_DB_VERSION = 2;
+export const RESEARCH_STORES = ['jobs','stageArtifacts','stageMetadata','queryBatches','ddgsBatches','sources','actors','targets','evidence','incidents','pois','progress','errors','diagnostics'];
 
 function memoryStore() {
   const buckets = new Map(RESEARCH_STORES.map((name) => [name, new Map()]));
@@ -48,6 +48,9 @@ export class ResearchJobStore {
   }
   async createJob(input) { const id = `job_${Date.now()}`; return this.put('jobs', { id, jobId:id, status:'running', input, createdAt:new Date().toISOString() }); }
   async putArtifact(jobId, stage, artifact) { return this.put('stageArtifacts', { id:`${jobId}_${stage}_artifact`, jobId, stage, artifact }); }
+  async getArtifact(jobId, stage) { return this.get('stageArtifacts', `${jobId}_${stage}_artifact`); }
+  async putStageMetadata(jobId, stage, status, extra = {}) { return this.put('stageMetadata', { id:`${jobId}_${stage}_metadata`, jobId, stage, status, ...extra }); }
+  async getStageMetadata(jobId, stage) { return this.get('stageMetadata', `${jobId}_${stage}_metadata`); }
   async putBatch(store, jobId, stage, batchId, records, extra = {}) { return this.put(store, { id:`${jobId}_${stage}_${batchId}`, jobId, stage, batchId, records, ...extra }); }
   async putProgress(jobId, progress) { return this.put('progress', { id:`${jobId}_progress`, jobId, ...sanitizeProgress(progress) }); }
 }
